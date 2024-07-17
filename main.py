@@ -32,6 +32,7 @@ def handle_client(client_socket, addr):
                 expected_response = f'pong from client, uid = {uid}, token = 12345'
                 if response == expected_response:
                     missed_pings = 0  # Reset missed pings count
+                    print(response)
                 else:
                     missed_pings += 1
             except socket.error:
@@ -51,9 +52,9 @@ def handle_client(client_socket, addr):
                         if 'event' in event_data and 'data' in event_data:
                             print(f"Received event: {event_data['event']} with data: {event_data['data']}")
                             # 处理事件
-                            if event_data['event'] == 'report status':
+                            if event_data['event'] == 'node_status':
                                 # 回复系统状态示例
-                                response = json.dumps({"cmd": "get system status", "status": "ok"})
+                                response = json.dumps({"ack": "node_status"})
                                 client_socket.send(response.encode('utf-8'))
                     except json.JSONDecodeError:
                         print("Received non-JSON data:", data)
@@ -69,7 +70,7 @@ def handle_client(client_socket, addr):
 
     # 标记客户端为在线状态
     client_status[uid] = 'online'
-    print(f"Client {uid} marked as online")
+    print(f"Client {uid} marked as online!")
 
     # 创建并启动线程发送ping消息
     ping_thread = threading.Thread(target=send_ping, args=(client_socket, uid))
@@ -83,7 +84,7 @@ def start_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind(('0.0.0.0', 9999))
     server.listen(5)
-    print("Server listening on port 9999")
+    print("Server listening on port 9999...")
 
     while True:
         client_socket, addr = server.accept()
