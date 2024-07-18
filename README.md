@@ -28,6 +28,28 @@ updateTIme: 2024-07-18
 
 暂无
 
+## 细节
+
+```
+# 客户端主动发送认证消息
+{"event": "hello_from_client", "data": {"uid": "xxxx", "token": "xxxxx"}}
+
+# 服务端认证成功消息
+{"event": "hello_from_server", "data": {"client_uid": "xxxx"}}
+
+# 服务端发送ping消息
+{"event": "ping_from_server", "data": {"client_uid": "xxxx"}}
+
+# 客户端回复pong消息
+{"event": "pong_from_client", "data": {"uid": "xxxx"}}
+
+# 客户端发送节点状态
+{"event": "node_status_report", "data": {"uid": "xxxx", "key": "value", ...}}
+
+# 服务器发送节点状态接收回执
+{"event": "node_status_received", "data": {"client_uid": "xxxx"}}
+```
+
 # 更新记录
 
 - 2024-07-06
