@@ -12,7 +12,9 @@ def handle_client(client_socket, addr):
     # 认证
     def authenticate(client_socket):
         try:
+            # 等待来自客户端的认证消息
             auth_data = client_socket.recv(1024).decode('utf-8')
+            print(f"[Client event] {auth_data}")
             if auth_data:
                 try:
                     event_data = json.loads(auth_data)
@@ -25,13 +27,14 @@ def handle_client(client_socket, addr):
 
                         # 检查uid和token是否存在
                         if uid is not None and token is not None:
-                            print(f"UID: {uid}, Token: {token}")
+                            print(f"[INFO] UID: {uid}, Token: {token}")
 
                             # 验证uid和token是否合法（未实现）
 
                             # 发送认证成功回复
                             response = {"event": "hello_from_server", "data": {"client_uid": uid}}
                             response = json.dumps(response, separators=(',', ':'))
+                            print(f"[Server event] {response}")
                             client_socket.send(response.encode('utf-8'))
                             return uid
                         else:
@@ -51,16 +54,18 @@ def handle_client(client_socket, addr):
             try:
                 ping_msg = {"event": "ping_from_server", "data": {"client_uid": uid}}
                 ping_msg = json.dumps(ping_msg, separators=(',', ':'))
+                print(f"[Server event] {ping_msg}")
                 client_socket.send(ping_msg.encode('utf-8'))
                 time.sleep(5)
             except socket.error:
                 print(f"Socket error, uid: {uid}")
                 client_status[uid]["missed_ping"] += 1
+                time.sleep(5)
 
             # 超过3次ping失败则标记为下线，然后退出线程
             if client_status[uid]["missed_ping"] > 3:
                 client_status[uid]["status"] = "offline"
-                print(f"Client {uid} marked as offline!")
+                print(f"[INFO] Client {uid} marked as offline!")
                 break
 
     # 认证
@@ -69,7 +74,7 @@ def handle_client(client_socket, addr):
     # 如果认证成功，将客户端标记为在线状态
     if uid:
         client_status[uid] = {"status": "online", "missed_ping": 0}
-        print(f"Client {uid} marked as online!")
+        print(f"[INFO] Client {uid} marked as online!")
 
     # 如果认证失败，则关闭连接，然后退出线程
     else:
@@ -84,13 +89,13 @@ def handle_client(client_socket, addr):
     while True:
         try:
             data = client_socket.recv(1024).decode('utf-8')
+            print(f"[Client event] {data}")
             if data:
                 try:
                     event_data = json.loads(data)
 
                     # 处理事件
                     if "event" in event_data and "data" in event_data:
-                        print(f"Received event: {event_data["event"]} with data: {event_data["data"]}")
 
                         # pong_from_server 事件
                         if event_data["event"] == "pong_from_client":
