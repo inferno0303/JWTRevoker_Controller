@@ -19,7 +19,7 @@ class ClientHandler:
         self.client_uid = None
         self.token = None
 
-    def await_client_auth_msg(self):
+    def _await_client_auth_msg(self):
         client_msg = self.nio_tcp_msg_sender_receiver.recv_msg()
         try:
             client_msg = json.loads(client_msg)
@@ -32,13 +32,8 @@ class ClientHandler:
         except json.JSONDecodeError:
             print("Received non-JSON data:", client_msg)
 
-    def reply_auth_success_msg(self):
-        msg = {"event": "hello_from_server", "data": {"client_uid": self.client_uid}}
-        msg = json.dumps(msg, separators=(',', ':'))
-        self.nio_tcp_msg_sender_receiver.send_msg(msg)
-
     def do_client_auth(self):
-        auth_msg = self.await_client_auth_msg()
+        auth_msg = self._await_client_auth_msg()
         if not auth_msg:
             self.client_socket.close()
             return False
@@ -49,6 +44,16 @@ class ClientHandler:
         self.client_uid = auth_msg.get("client_uid")
         self.token = auth_msg.get("token")
         return True
+
+    def reply_auth_success_msg(self):
+        msg = {"event": "auth_success", "data": {"client_uid": self.client_uid}}
+        msg = json.dumps(msg, separators=(',', ':'))
+        self.nio_tcp_msg_sender_receiver.send_msg(msg)
+
+    def reply_auth_failed_msg(self):
+        msg = {"event": "auth_failed", "data": {"msg": "token incorrect"}}
+        msg = json.dumps(msg, separators=(',', ':'))
+        self.nio_tcp_msg_sender_receiver.send_msg(msg)
 
     def send_ping_msg_worker(self, interval):
         while True:
@@ -76,4 +81,8 @@ class ClientHandler:
         self.close_socket()
 
     def close_socket(self):
+        self.client_socket.close()
+
+    def close_socket_after_sendall(self):
+        self.nio_tcp_msg_sender_receiver.send_msg_queue.join()
         self.client_socket.close()

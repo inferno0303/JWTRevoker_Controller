@@ -18,7 +18,7 @@ class NioTcpMsgSenderReceiver:
         # 消息发送线程
         self.send_thread_run_flag = threading.Event()
         self.send_thread_run_flag.set()
-        self.send_thread = threading.Thread(target=self.send_msg_worker)
+        self.send_thread = threading.Thread(target=self._send_msg_worker)
         self.send_thread.start()
 
         # 消息接收队列
@@ -27,7 +27,7 @@ class NioTcpMsgSenderReceiver:
         # 消息接收线程
         self.recv_thread_run_flag = threading.Event()
         self.recv_thread_run_flag.set()
-        self.recv_thread = threading.Thread(target=self.recv_msg_worker)
+        self.recv_thread = threading.Thread(target=self._recv_msg_worker)
         self.recv_thread.start()
 
     def __del__(self):
@@ -44,7 +44,7 @@ class NioTcpMsgSenderReceiver:
         self.send_msg_queue.put(item=msg, block=True)
 
     # 取出发送消息队列的消息（消费者），并写入到套接字发送缓冲区
-    def send_msg_worker(self):
+    def _send_msg_worker(self):
         while self.send_thread_run_flag.is_set():
             msg = self.send_msg_queue.get(block=True)
 
@@ -59,7 +59,7 @@ class NioTcpMsgSenderReceiver:
         return self.recv_msg_queue.get(block=True)
 
     # 取出套接字缓冲区的内容，放入接收消息队列（生产者）
-    def recv_msg_worker(self):
+    def _recv_msg_worker(self):
         while self.recv_thread_run_flag.is_set():
 
             # 1、读数据头

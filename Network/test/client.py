@@ -4,7 +4,7 @@ import socket
 import time
 import random
 
-from Network.NioTcpMsgSenderReceiver import NIOSocketSenderReceiver
+from Network.NioTcpMsgSenderReceiver import NioTcpMsgSenderReceiver
 
 
 def connect_to_server(ip, port):
@@ -26,7 +26,7 @@ def tcp_client_worker(ip, port):
         return
 
     # 创建 NIO 对象
-    nio_tcp_msg_sender_receiver = NIOSocketSenderReceiver(client_socket)
+    nio_tcp_msg_sender_receiver = NioTcpMsgSenderReceiver(client_socket)
 
     # 接收数据线程，模拟处理数据较慢的情况
     def process_msg_worker():

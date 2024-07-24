@@ -31,20 +31,23 @@ updateTIme: 2024-07-18
 ## 细节
 
 ```
-# 客户端主动发送认证消息
-{"event": "hello_from_client", "data": {"uid": "xxxx", "token": "xxxxx"}}
+# 来自客户端的认证消息
+{"event": "hello_from_client", "data": {"client_uid": "xxxx", "token": "xxxxx"}}
 
-# 服务端认证成功消息
-{"event": "hello_from_server", "data": {"client_uid": "xxxx"}}
+# 回复认证成功消息
+{"event": "auth_success", "data": {"client_uid": "xxxx"}}
+
+# 回复认证失败消息
+{"event": "auth_failed", "data": "{"msg": "token incorrect"}"}
 
 # 服务端发送ping消息
 {"event": "ping_from_server", "data": {"client_uid": "xxxx"}}
 
 # 客户端回复pong消息
-{"event": "pong_from_client", "data": {"uid": "xxxx"}}
+{"event": "pong_from_client", "data": {"client_uid": "xxxx"}}
 
 # 客户端发送节点状态
-{"event": "node_status_report", "data": {"uid": "xxxx", "key": "value", ...}}
+{"event": "node_status_report", "data": {"client_uid": "xxxx", "key": "value", ...}}
 
 # 服务器发送节点状态接收回执
 {"event": "node_status_received", "data": {"client_uid": "xxxx"}}
@@ -52,10 +55,14 @@ updateTIme: 2024-07-18
 
 # 更新记录
 
-- 2024-07-06
+### 2024-07-06
 
 初始化
 
-- 2024-07-18
+### 2024-07-18
 
 第二次提交
+
+### 2024-07-25
+
+存档

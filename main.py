@@ -9,14 +9,15 @@ from Service.ClientHandler import ClientHandler
 
 
 def handle_client_worker(client_socket, addr, authenticator, client_health_monitor):
-
     # 客户端处理
     client_handler = ClientHandler(client_socket=client_socket, addr=addr, authenticator=authenticator,
                                    client_health_monitor=client_health_monitor)
 
     # 客户端认证
     if not client_handler.do_client_auth():
-        client_handler.client_socket()
+        client_handler.reply_auth_failed_msg()
+        # 等待回复完成后再关闭
+        client_handler.close_socket_after_sendall()
 
     # 回复认证成功消息
     client_handler.reply_auth_success_msg()
