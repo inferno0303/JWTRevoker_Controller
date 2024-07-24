@@ -6,7 +6,7 @@ BUFFER_SIZE = 1024
 MSG_QUEUE_MAXSIZE = 40960
 
 
-class NIOSocketSenderReceiver:
+class NioTcpMsgSenderReceiver:
     def __init__(self, _socket):
         if _socket is None:
             raise ValueError("NIOSocketSenderReceiver initialization failed: invalid socket.")

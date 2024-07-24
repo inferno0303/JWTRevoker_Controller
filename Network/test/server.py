@@ -4,27 +4,10 @@ import socket
 import time
 import random
 
-from NetworkUtils.NioTcpMsgSenderReceiver import NIOSocketSenderReceiver
+from Network.NioTcpMsgSenderReceiver import NIOSocketSenderReceiver
 
 
-def connect_to_server(ip, port):
-    try:
-        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        client_socket.connect((ip, port))
-        print(f"Connected to server {ip}:{port}")
-        return client_socket
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        return None
-
-
-def tcp_client_worker(ip, port):
-    # 连接到服务器
-    client_socket = connect_to_server(ip, port)
-    if client_socket is None:
-        print("Failed to connect to server.")
-        return
-
+def handle_client_worker(client_socket, addr):
     # 创建 NIO 对象
     nio_tcp_msg_sender_receiver = NIOSocketSenderReceiver(client_socket)
 
@@ -58,9 +41,25 @@ def tcp_client_worker(ip, port):
     send_msg_thread2.join()
 
 
+def tcp_server_worker(ip, port):
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind((ip, port))
+    server.listen(5)
+    print(f"Server listening on {ip}:{port}...")
+
+    while True:
+        try:
+            client_socket, addr = server.accept()
+            print(f"Accepted connection from {addr}")
+            client_handler = threading.Thread(target=handle_client_worker, args=(client_socket, addr))
+            client_handler.start()
+        except Exception as e:
+            print(f"Error accepting connection: {e}")
+
+
 if __name__ == "__main__":
     server_ip = "127.0.0.1"
-    server_port = 9700
-    process = multiprocessing.Process(target=tcp_client_worker, args=(server_ip, server_port))
+    server_port = 9800
+    process = multiprocessing.Process(target=tcp_server_worker, args=(server_ip, server_port))
     process.start()
     process.join()

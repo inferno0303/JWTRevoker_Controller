@@ -1,139 +1,76 @@
 import multiprocessing
 import threading
 import socket
-import time
-import json
 
-# 共享存储，用于保存客户端状态
-client_status = {}
-
-
-def handle_client(client_socket, addr):
-    # 认证
-    def authenticate(client_socket):
-        try:
-            # 等待来自客户端的认证消息
-            auth_data = client_socket.recv(1024).decode('utf-8')
-            print(f"[Client event] {auth_data}")
-            if auth_data:
-                try:
-                    event_data = json.loads(auth_data)
-                    if "event" in event_data and "data" in event_data and event_data["event"] == "hello_from_client":
-
-                        # 提取uid和token的值
-                        data = event_data.get("data")
-                        uid = data.get("uid")
-                        token = data.get("token")
-
-                        # 检查uid和token是否存在
-                        if uid is not None and token is not None:
-                            print(f"[INFO] UID: {uid}, Token: {token}")
-
-                            # 验证uid和token是否合法（未实现）
-
-                            # 发送认证成功回复
-                            response = {"event": "hello_from_server", "data": {"client_uid": uid}}
-                            response = json.dumps(response, separators=(',', ':'))
-                            print(f"[Server event] {response}")
-                            client_socket.send(response.encode('utf-8'))
-                            return uid
-                        else:
-                            return False
-                    else:
-                        return False
-                except json.JSONDecodeError:
-                    print("Received non-JSON data:", auth_data)
-                    return False
-        except socket.error:
-            return False
-
-    # 发送ping命令
-    def send_ping(client_socket, uid):
-        # 循环发送ping消息
-        while True:
-            try:
-                ping_msg = {"event": "ping_from_server", "data": {"client_uid": uid}}
-                ping_msg = json.dumps(ping_msg, separators=(',', ':'))
-                print(f"[Server event] {ping_msg}")
-                client_socket.send(ping_msg.encode('utf-8'))
-                time.sleep(5)
-            except socket.error:
-                print(f"Socket error, uid: {uid}")
-                client_status[uid]["missed_ping"] += 1
-                time.sleep(5)
-
-            # 超过3次ping失败则标记为下线，然后退出线程
-            if client_status[uid]["missed_ping"] > 3:
-                client_status[uid]["status"] = "offline"
-                print(f"[INFO] Client {uid} marked as offline!")
-                break
-
-    # 认证
-    uid = authenticate(client_socket)
-
-    # 如果认证成功，将客户端标记为在线状态
-    if uid:
-        client_status[uid] = {"status": "online", "missed_ping": 0}
-        print(f"[INFO] Client {uid} marked as online!")
-
-    # 如果认证失败，则关闭连接，然后退出线程
-    else:
-        client_socket.close()
-        return -1
-
-    # 创建并启动线程循环发送ping消息
-    ping_thread = threading.Thread(target=send_ping, args=(client_socket, uid))
-    ping_thread.start()
-
-    # 监听客户端事件
-    while True:
-        try:
-            data = client_socket.recv(1024).decode('utf-8')
-            print(f"[Client event] {data}")
-            if data:
-                try:
-                    event_data = json.loads(data)
-
-                    # 处理事件
-                    if "event" in event_data and "data" in event_data:
-
-                        # pong_from_server 事件
-                        if event_data["event"] == "pong_from_client":
-                            data = event_data.get("data")
-                            if data.get("uid") == uid:
-                                client_status[uid] = {"status": "online", "missed_ping": 0}
-
-                        # node_status_report 事件
-                        if event_data["event"] == "node_status_report":
-                            data = event_data.get("data")
-                            if data.get("uid") == uid:
-                                response = {"event": "node_status_received", "data": {"client_uid": uid}}
-                                response = json.dumps(response, separators=(',', ':'))
-                                client_socket.send(response.encode('utf-8'))
-
-                except json.JSONDecodeError:
-                    print("Received non-JSON data:", data)
-        except socket.error:
-            time.sleep(1)
-            if client_status[uid]["status"] == "offline":
-                break
+from Service.ConfigReader import read_config
+from Service.ClientHealthMonitor import ClientHealthMonitor
+from Service.Authenticator import Authenticator
+from Service.ClientHandler import ClientHandler
 
 
-def tcp_server_worker(port):
+def handle_client_worker(client_socket, addr, authenticator, client_health_monitor):
+
+    # 客户端处理
+    client_handler = ClientHandler(client_socket=client_socket, addr=addr, authenticator=authenticator,
+                                   client_health_monitor=client_health_monitor)
+
+    # 客户端认证
+    if not client_handler.do_client_auth():
+        client_handler.client_socket()
+
+    # 回复认证成功消息
+    client_handler.reply_auth_success_msg()
+
+    # 启动ping消息发送线程
+    ping_interval = 5
+    send_ping_msg_thread = threading.Thread(target=client_handler.send_ping_msg_worker, args=(ping_interval,))
+    send_ping_msg_thread.start()
+
+    # 启动消息处理线程
+    process_msg_thread = threading.Thread(target=client_handler.process_msg_worker)
+    process_msg_thread.start()
+
+    # 启动健康检查线程
+    client_health_check_thread = threading.Thread(target=client_handler.client_health_check_worker)
+    client_health_check_thread.start()
+
+    # 事件循环
+    send_ping_msg_thread.join()
+    process_msg_thread.join()
+    client_health_check_thread.join()
+
+
+def tcp_server_worker(ip, port):
+    # 客户端认证器
+    authenticator = Authenticator()
+
+    # 客户端健康监控器
+    client_health_monitor = ClientHealthMonitor()
+
+    # 监听socket
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(('0.0.0.0', port))
+    server.bind((ip, port))
     server.listen(5)
-    print('[INFO] Server listening on port 9999...')
+    print(f"Server listening on {ip}:{port}...")
 
     while True:
-        client_socket, addr = server.accept()
-        print(f"[INFO] Accepted connection from {addr}")
-        client_handler = threading.Thread(target=handle_client, args=(client_socket, addr))
-        client_handler.start()
+        try:
+            client_socket, addr = server.accept()
+            print(f"Accepted connection from {addr}")
+            client_handler = threading.Thread(target=handle_client_worker,
+                                              args=(client_socket, addr, authenticator, client_health_monitor))
+            client_handler.start()
+        except Exception as e:
+            print(f"Error accepting connection: {e}")
 
 
 if __name__ == "__main__":
+    # 读取配置文件
+    config = read_config("config.txt")
+
     # 创建TCP服务器线程
-    process = multiprocessing.Process(target=tcp_server_worker, args=(9999,))
+    server_ip = config.get("server_ip")
+    server_port = int(config.get("server_port"))
+    process = multiprocessing.Process(target=tcp_server_worker, args=(server_ip, server_port))
     process.start()
     process.join()
