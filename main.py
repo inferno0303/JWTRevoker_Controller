@@ -1,44 +1,47 @@
-import multiprocessing
+# import multiprocessing
 import threading
 import socket
 
 from Service.ConfigReader import read_config
-from Service.ClientHealthMonitor import ClientHealthMonitor
-from Service.Authenticator import Authenticator
-from Service.ClientHandler import ClientHandler
+from Network.ClientHealthMonitor import ClientHealthMonitor
+from Network.Authenticator import Authenticator
+from Service.MsgHandler import MsgHandler
 
 
 def handle_client_worker(client_socket, addr, authenticator, client_health_monitor):
     # 客户端处理
-    client_handler = ClientHandler(client_socket=client_socket, addr=addr, authenticator=authenticator,
-                                   client_health_monitor=client_health_monitor)
+    msg_handler = MsgHandler(client_socket=client_socket, addr=addr, authenticator=authenticator,
+                             client_health_monitor=client_health_monitor)
 
     # 客户端认证
-    if not client_handler.do_client_auth():
-        client_handler.reply_auth_failed_msg()
+    if not msg_handler.do_client_auth():
+        msg_handler.on_auth_failed_msg()
         # 等待回复完成后再关闭
-        client_handler.close_socket_after_sendall()
+        msg_handler.close_socket_after_sendall()
+        return
 
     # 回复认证成功消息
-    client_handler.reply_auth_success_msg()
+    msg_handler.on_auth_success_msg()
+
+    # 启动健康检查线程
+    client_health_check_thread = threading.Thread(target=msg_handler.client_health_check_worker)
+    client_health_check_thread.start()
 
     # 启动ping消息发送线程
     ping_interval = 5
-    send_ping_msg_thread = threading.Thread(target=client_handler.send_ping_msg_worker, args=(ping_interval,))
+    send_ping_msg_thread = threading.Thread(target=msg_handler.send_ping_msg_worker, args=(ping_interval,))
     send_ping_msg_thread.start()
 
     # 启动消息处理线程
-    process_msg_thread = threading.Thread(target=client_handler.process_msg_worker)
+    process_msg_thread = threading.Thread(target=msg_handler.process_msg_worker)
     process_msg_thread.start()
 
-    # 启动健康检查线程
-    client_health_check_thread = threading.Thread(target=client_handler.client_health_check_worker)
-    client_health_check_thread.start()
-
     # 事件循环
-    send_ping_msg_thread.join()
-    process_msg_thread.join()
     client_health_check_thread.join()
+
+    # 如果能执行到这里，说明客户端已经下线了
+    print("停止 client worker 线程...")
+    return
 
 
 def tcp_server_worker(ip, port):
@@ -72,6 +75,6 @@ if __name__ == "__main__":
     # 创建TCP服务器线程
     server_ip = config.get("server_ip")
     server_port = int(config.get("server_port"))
-    process = multiprocessing.Process(target=tcp_server_worker, args=(server_ip, server_port))
+    process = threading.Thread(target=tcp_server_worker, args=(server_ip, server_port))
     process.start()
     process.join()

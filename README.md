@@ -31,26 +31,33 @@ updateTIme: 2024-07-18
 ## 细节
 
 ```
-# 来自客户端的认证消息
+# 客户端：发送认证请求消息
 {"event": "hello_from_client", "data": {"client_uid": "xxxx", "token": "xxxxx"}}
 
-# 回复认证成功消息
+# 服务端：发送认证成功消息
 {"event": "auth_success", "data": {"client_uid": "xxxx"}}
 
-# 回复认证失败消息
-{"event": "auth_failed", "data": "{"msg": "token incorrect"}"}
+# 服务端：发送认证失败消息
+{"event": "auth_failed", "data": "{"msg": "client_uid or token incorrect"}"}
 
-# 服务端发送ping消息
+# 服务端：发送ping消息
 {"event": "ping_from_server", "data": {"client_uid": "xxxx"}}
 
-# 客户端回复pong消息
+# 客户端：发送pong消息
 {"event": "pong_from_client", "data": {"client_uid": "xxxx"}}
 
-# 客户端发送节点状态
-{"event": "node_status_report", "data": {"client_uid": "xxxx", "key": "value", ...}}
+# 客户端：发送布隆过滤器默认配置查询
+{"event": "get_bloom_filter_default_config", "data": {"client_uid": "xxxx"}}
 
-# 服务器发送节点状态接收回执
-{"event": "node_status_received", "data": {"client_uid": "xxxx"}}
+# 服务端：发送布隆过滤器默认配置
+{"event": "bloom_filter_default_config", "data": {"client_uid": "xxxx", "max_jwt_life_time": "86400", "bloom_filter_rotation_time": "3600", "bloom_filter_size": "8192", "num_hash_function": "5"}}
+
+# 服务端：发送节点状态查询
+{"event": "get_node_status", "data": {"client_uid": "xxxx"}}
+
+# 客户端：发送节点状态
+{"event": "node_status", "data": {"client_uid": "xxxx", "key": "value", ...}}
+
 ```
 
 # 更新记录

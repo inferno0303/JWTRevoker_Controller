@@ -6,7 +6,7 @@ BUFFER_SIZE = 1024
 MSG_QUEUE_MAXSIZE = 40960
 
 
-class NioTcpMsgSenderReceiver:
+class NioTcpMsgBridge:
     def __init__(self, _socket):
         if _socket is None:
             raise ValueError("NIOSocketSenderReceiver initialization failed: invalid socket.")
@@ -52,7 +52,11 @@ class NioTcpMsgSenderReceiver:
             msg_frame = struct.pack('>I', len(msg)) + msg.encode('utf-8')
 
             # 2、将待发送的信息写入到套接字的发送缓冲区中
-            self.socket.sendall(msg_frame)
+            try:
+                self.socket.sendall(msg_frame)
+            except Exception as e:
+                print(f"发送数据失败：{msg_frame}, {e}")
+                return
 
     # 取出接收消息队列的消息（消费者）
     def recv_msg(self):
@@ -63,13 +67,24 @@ class NioTcpMsgSenderReceiver:
         while self.recv_thread_run_flag.is_set():
 
             # 1、读数据头
-            msg_header = self._recv_all(4)
+            try:
+                msg_header = self._recv_all(4)
+            except Exception as e:
+                print(f"接收数据失败：{e}")
+                return
+
             if len(msg_header) < 4:
                 raise RuntimeError("Socket connection broken")
+
             msg_length = struct.unpack('>I', msg_header)[0]
 
             # 2、根据消息体长度读消息体
-            msg_body = self._recv_all(msg_length).decode('utf-8')
+            try:
+                msg_body = self._recv_all(msg_length).decode('utf-8')
+            except Exception as e:
+                print(f"接收数据失败：{e}")
+                return
+
             if len(msg_body) < msg_length:
                 raise RuntimeError("Socket connection broken")
 
@@ -92,3 +107,13 @@ class NioTcpMsgSenderReceiver:
     # 接收消息队列长度
     def recv_msg_queue_size(self):
         return self.recv_msg_queue.qsize()
+
+    # 主动关闭socket，并停止线程
+    def close_socket_and_stop(self):
+        self.send_thread_run_flag.clear()
+        self.recv_thread_run_flag.clear()
+        if self.send_thread.is_alive():
+            self.send_thread.join()
+        if self.recv_thread.is_alive():
+            self.recv_thread.join()
+        self.socket.close()

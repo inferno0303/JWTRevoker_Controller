@@ -12,7 +12,7 @@ class ClientHealthMonitor:
         monitor_thread = threading.Thread(target=self.monitor_worker)
         monitor_thread.start()
 
-    def update_last_message_time(self, client_uid):
+    def client_is_ok(self, client_uid):
         # 写入数据库
         # 写入缓存
         with self.lock:
@@ -20,8 +20,10 @@ class ClientHealthMonitor:
 
     def is_health(self, client_uid):
         with self.lock:
-            if self.client_health_list.get(client_uid).get("health_status") == "online":
-                return True
+            client_uid = self.client_health_list.get(client_uid, None)
+            if client_uid:
+                if client_uid.get("health_status", None) == "online":
+                    return True
             return False
 
     def monitor_worker(self):
