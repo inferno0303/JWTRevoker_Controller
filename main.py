@@ -5,13 +5,20 @@ import socket
 from Service.ConfigReader import read_config
 from Network.ClientHealthMonitor import ClientHealthMonitor
 from Network.Authenticator import Authenticator
-from Service.MsgHandler import MsgHandler
+from Service.ClientHandler import ClientHandler
+
+global_config = {}
 
 
-def handle_client_worker(client_socket, addr, authenticator, client_health_monitor):
+def handler_worker(client_socket, addr, authenticator, client_health_monitor):
     # 客户端处理
-    msg_handler = MsgHandler(client_socket=client_socket, addr=addr, authenticator=authenticator,
-                             client_health_monitor=client_health_monitor)
+    msg_handler = ClientHandler(
+        client_socket=client_socket,
+        addr=addr,
+        startup_config=global_config,
+        authenticator=authenticator,
+        client_health_monitor=client_health_monitor
+    )
 
     # 客户端认证
     if not msg_handler.do_client_auth():
@@ -24,8 +31,8 @@ def handle_client_worker(client_socket, addr, authenticator, client_health_monit
     msg_handler.on_auth_success_msg()
 
     # 启动健康检查线程
-    client_health_check_thread = threading.Thread(target=msg_handler.client_health_check_worker)
-    client_health_check_thread.start()
+    # client_health_check_thread = threading.Thread(target=msg_handler.client_health_check_worker)
+    # client_health_check_thread.start()
 
     # 启动ping消息发送线程
     ping_interval = 5
@@ -37,10 +44,11 @@ def handle_client_worker(client_socket, addr, authenticator, client_health_monit
     process_msg_thread.start()
 
     # 事件循环
-    client_health_check_thread.join()
+    # client_health_check_thread.join()
 
     # 如果能执行到这里，说明客户端已经下线了
-    print("停止 client worker 线程...")
+    process_msg_thread.join()
+    print(f"停止 client worker 线程...")
     return
 
 
@@ -61,7 +69,7 @@ def tcp_server_worker(ip, port):
         try:
             client_socket, addr = server.accept()
             print(f"Accepted connection from {addr}")
-            client_handler = threading.Thread(target=handle_client_worker,
+            client_handler = threading.Thread(target=handler_worker,
                                               args=(client_socket, addr, authenticator, client_health_monitor))
             client_handler.start()
         except Exception as e:
@@ -70,11 +78,14 @@ def tcp_server_worker(ip, port):
 
 if __name__ == "__main__":
     # 读取配置文件
-    config = read_config("config.txt")
+    startup_config = read_config("config.txt")
+    global_config = startup_config
 
-    # 创建TCP服务器线程
-    server_ip = config.get("server_ip")
-    server_port = int(config.get("server_port"))
+    # 读取启动参数
+    server_ip = startup_config.get("server_ip")
+    server_port = int(startup_config.get("server_port"))
+
+    # 创建服务器线程
     process = threading.Thread(target=tcp_server_worker, args=(server_ip, server_port))
     process.start()
     process.join()

@@ -8,7 +8,7 @@ class ClientHealthMonitor:
         # 缓存
         self.client_health_list = {}
         self.lock = threading.Lock()
-        # 启动监控线程
+        # 启动监控线程，每隔一段时间更新标记
         monitor_thread = threading.Thread(target=self.monitor_worker)
         monitor_thread.start()
 

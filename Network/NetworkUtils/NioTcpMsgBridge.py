@@ -10,7 +10,7 @@ class NioTcpMsgBridge:
     def __init__(self, _socket):
         if _socket is None:
             raise ValueError("NIOSocketSenderReceiver initialization failed: invalid socket.")
-        self.socket = _socket
+        self.sock = _socket
 
         # 消息发送队列
         self.send_msg_queue = queue.Queue(maxsize=MSG_QUEUE_MAXSIZE)
@@ -53,9 +53,10 @@ class NioTcpMsgBridge:
 
             # 2、将待发送的信息写入到套接字的发送缓冲区中
             try:
-                self.socket.sendall(msg_frame)
+                self.sock.sendall(msg_frame)
             except Exception as e:
                 print(f"发送数据失败：{msg_frame}, {e}")
+                self._on_socket_err()
                 return
 
     # 取出接收消息队列的消息（消费者）
@@ -71,6 +72,7 @@ class NioTcpMsgBridge:
                 msg_header = self._recv_all(4)
             except Exception as e:
                 print(f"接收数据失败：{e}")
+                self._on_socket_err()
                 return
 
             if len(msg_header) < 4:
@@ -83,6 +85,7 @@ class NioTcpMsgBridge:
                 msg_body = self._recv_all(msg_length).decode('utf-8')
             except Exception as e:
                 print(f"接收数据失败：{e}")
+                self._on_socket_err()
                 return
 
             if len(msg_body) < msg_length:
@@ -94,7 +97,7 @@ class NioTcpMsgBridge:
     def _recv_all(self, length):
         data = b''
         while len(data) < length:
-            packet = self.socket.recv(length - len(data))
+            packet = self.sock.recv(length - len(data))
             if not packet:
                 break
             data += packet
@@ -108,6 +111,12 @@ class NioTcpMsgBridge:
     def recv_msg_queue_size(self):
         return self.recv_msg_queue.qsize()
 
+    # 发生错误后清理
+    def _on_socket_err(self):
+        self.sock.close()
+        self.send_thread_run_flag.clear()
+        self.recv_thread_run_flag.clear()
+
     # 主动关闭socket，并停止线程
     def close_socket_and_stop(self):
         self.send_thread_run_flag.clear()
@@ -116,4 +125,4 @@ class NioTcpMsgBridge:
             self.send_thread.join()
         if self.recv_thread.is_alive():
             self.recv_thread.join()
-        self.socket.close()
+        self.sock.close()

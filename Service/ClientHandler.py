@@ -5,10 +5,11 @@ from Network.NetworkUtils.NioTcpMsgBridge import NioTcpMsgBridge
 from Network.NetworkUtils.MsgFormat import do_msg_assembly, do_msg_parse
 
 
-class MsgHandler:
-    def __init__(self, client_socket, addr, authenticator, client_health_monitor):
+class ClientHandler:
+    def __init__(self, client_socket, addr, startup_config, authenticator, client_health_monitor):
         self.client_socket = client_socket
         self.addr = addr
+        self.startup_config = startup_config
         self.authenticator = authenticator
         self.client_health_monitor = client_health_monitor
 
@@ -60,8 +61,13 @@ class MsgHandler:
         self.nio_tcp_msg_bridge.send_msg(msg)
 
     def on_get_bloom_filter_default_config(self):
-        data = {"client_uid": "xxxx", "max_jwt_life_time": "86400", "bloom_filter_rotation_time": "3600",
-                "bloom_filter_size": "8192", "num_hash_function": "5"}
+        data = {
+            "client_uid": "xxxx",
+            "max_jwt_life_time": self.startup_config.get("max_jwt_life_time", 86400),
+            "bloom_filter_rotation_time": self.startup_config.get("bloom_filter_rotation_time", 3600),
+            "bloom_filter_size": self.startup_config.get("bloom_filter_size", 8192),
+            "num_hash_function": self.startup_config.get("num_hash_function", 5)
+        }
         msg = do_msg_assembly("bloom_filter_default_config", data)
         self.nio_tcp_msg_bridge.send_msg(msg)
 

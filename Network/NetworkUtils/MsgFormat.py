@@ -14,7 +14,7 @@ def do_msg_assembly(event, data):
             "event": event,
             "data": data
         }
-        return json.dumps(jsonObject)
+        return json.dumps(jsonObject, separators=(',', ':'))
     except (TypeError, ValueError) as e:
         print(f"Error assembling JSON message: {e}")
         return ""
