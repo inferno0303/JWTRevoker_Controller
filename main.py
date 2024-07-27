@@ -34,11 +34,6 @@ def handler_worker(client_socket, addr, authenticator, client_health_monitor):
     # client_health_check_thread = threading.Thread(target=msg_handler.client_health_check_worker)
     # client_health_check_thread.start()
 
-    # 启动ping消息发送线程
-    ping_interval = 5
-    send_ping_msg_thread = threading.Thread(target=msg_handler.send_ping_msg_worker, args=(ping_interval,))
-    send_ping_msg_thread.start()
-
     # 启动消息处理线程
     process_msg_thread = threading.Thread(target=msg_handler.process_msg_worker)
     process_msg_thread.start()

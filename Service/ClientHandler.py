@@ -71,12 +71,6 @@ class ClientHandler:
         msg = do_msg_assembly("bloom_filter_default_config", data)
         self.nio_tcp_msg_bridge.send_msg(msg)
 
-    # 定时发送 ping_from_server 消息
-    def send_ping_msg_worker(self, interval):
-        while True:
-            self.on_send_ping_msg()
-            time.sleep(interval)
-
     # 处理消息线程
     def process_msg_worker(self):
         while True:

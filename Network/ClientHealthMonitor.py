@@ -33,6 +33,8 @@ class ClientHealthMonitor:
             now = time.time()
             with self.lock:
                 for key, value in self.client_health_list.items():
+                    if not value["health_status"]:  # 如果已经标记为下线，则不再检测
+                        continue
                     if now - value.get("last_heartbeat") > 30:
                         value["health_status"] = False
                         print(f"Client uid {key} marked offline")
