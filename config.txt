@@ -11,3 +11,7 @@ bloom_filter_rotation_time = 10
 bloom_filter_size = 10240
 # 哈希函数个数
 num_hash_function = 10
+
+# HTTP服务器
+http_server_listen_ip = 127.0.0.1
+http_server_listen_port = 5000

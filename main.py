@@ -6,6 +6,12 @@ from Service.ConfigReader import read_config
 from Network.ClientHealthMonitor import ClientHealthMonitor
 from Network.Authenticator import Authenticator
 from Service.ClientHandler import ClientHandler
+from Backend import FlaskApp
+
+from queue import Queue
+
+# 在主程序中初始化一个全局的消息队列
+message_queue = Queue()
 
 global_config = {}
 
@@ -73,14 +79,24 @@ def tcp_server_worker(ip, port):
 
 if __name__ == "__main__":
     # 读取配置文件
-    startup_config = read_config("config.txt")
-    global_config = startup_config
+    config = read_config("config.txt")
+    global_config = config
 
     # 读取启动参数
-    server_ip = startup_config.get("server_ip")
-    server_port = int(startup_config.get("server_port"))
+    server_ip = config.get("server_ip")
+    server_port = int(config.get("server_port"))
 
     # 创建服务器线程
     process = threading.Thread(target=tcp_server_worker, args=(server_ip, server_port))
     process.start()
+
+    # 创建并启动Flask服务器线程
+    http_server_listen_ip = config.get("http_server_listen_ip")
+    http_server_listen_port = config.get("http_server_listen_port")
+    flask_thread = threading.Thread(target=FlaskApp.start_flask_app,
+                                    args=(http_server_listen_ip, http_server_listen_port))
+    flask_thread.start()
+
+    # 循环
+    flask_thread.join()
     process.join()

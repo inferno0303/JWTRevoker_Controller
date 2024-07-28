@@ -6,7 +6,7 @@
 
 createTime: 2024-07-06
 
-updateTIme: 2024-07-18
+updateTIme: 2024-07-29
 
 # 介绍
 
@@ -28,7 +28,7 @@ updateTIme: 2024-07-18
 
 暂无
 
-## 细节
+## 与节点交互的细节
 
 ```
 # 客户端：发送认证请求消息
@@ -54,16 +54,41 @@ updateTIme: 2024-07-18
 
 ```
 
+## 后端程序
+
+表结构：
+
+```SQL
+CREATE TABLE IF NOT EXISTS tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT,
+    expire_time INTEGER,
+    node_name TEXT,
+    generation_time INTEGER,
+    is_revoke INTEGER
+)
+```
+
+1. 获取新令牌：GET http://127.0.0.1:5000/get_new_token
+
+2. 根据UUID获取令牌：GET http://127.0.0.1:5000/get_token_by_uuid?uuid=<your-uuid>
+
+3. 分页获取令牌：GET http://127.0.0.1:5000/get_token?page_num=1&page_size=100
+
 # 更新记录
 
 ### 2024-07-06
 
-初始化
+- 初始化
 
 ### 2024-07-18
 
-第二次提交
+- 第二次提交
 
 ### 2024-07-25
 
-存档
+- 存档
+
+### 2024-07-29
+
+- 存档
