@@ -69,11 +69,15 @@ CREATE TABLE IF NOT EXISTS tokens (
 )
 ```
 
-1. 获取新令牌：GET http://127.0.0.1:5000/get_new_token
+1. 申请新令牌：GET http://127.0.0.1:5000/get_new_token
+2. 分页获取令牌：GET http://127.0.0.1:5000/get_token?page_num=1&page_size=100
+3. 根据UUID获取令牌：GET http://127.0.0.1:5000/get_token_by_uuid?uuid=<your-uuid>
+4. 撤回某个Token：GET http://127.0.0.1:5000/tokens/<uuid>/revoke
+5. 获取未过期Token数量（expire_time > 当前时间戳）：GET http://127.0.0.1:5000/tokens/count
+6. 获取有Token数量（expire_time > 当前时间戳 且 is_revoke = 0）：GET http://127.0.0.1:5000/tokens/valid_count
+7. 获取已撤回Token数量：GET http://127.0.0.1:5000/tokens/revoked_count
+8. 获取已经过期的记录数量：GET http://127.0.01:5000/tokens/expired_count
 
-2. 根据UUID获取令牌：GET http://127.0.0.1:5000/get_token_by_uuid?uuid=<your-uuid>
-
-3. 分页获取令牌：GET http://127.0.0.1:5000/get_token?page_num=1&page_size=100
 
 # 更新记录
 
