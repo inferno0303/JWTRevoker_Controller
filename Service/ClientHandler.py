@@ -22,11 +22,11 @@ class ClientHandler:
 
     def do_client_auth(self):
         # 接收验证消息
-        new_msg = self.nio_tcp_msg_bridge.recv_msg()
-        event, data = do_msg_parse(new_msg)
-        if event != "hello_from_client":
-            print("Cannot receive authenticate message")
-            return False
+        while True:
+            new_msg = self.nio_tcp_msg_bridge.recv_msg()
+            event, data = do_msg_parse(new_msg)
+            if event == "hello_from_client":
+                break
 
         # 读取 client_uid 和 token
         client_uid = data.get("client_uid", None)
@@ -64,9 +64,9 @@ class ClientHandler:
         data = {
             "client_uid": "xxxx",
             "max_jwt_life_time": self.startup_config.get("max_jwt_life_time", 86400),
-            "bloom_filter_rotation_time": self.startup_config.get("bloom_filter_rotation_time", 3600),
+            "rotation_interval": self.startup_config.get("rotation_interval", 10),
             "bloom_filter_size": self.startup_config.get("bloom_filter_size", 8192),
-            "num_hash_function": self.startup_config.get("num_hash_function", 5)
+            "hash_function_num": self.startup_config.get("hash_function_num", 5)
         }
         msg = do_msg_assembly("bloom_filter_default_config", data)
         self.nio_tcp_msg_bridge.send_msg(msg)
