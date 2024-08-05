@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 # 连接SQLite数据库的辅助函数
 def get_db_connection():
-    conn = sqlite3.connect('tokens.db')
+    conn = sqlite3.connect('sqlite.db')
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -165,8 +165,9 @@ def get_expired_token_count():
     return jsonify({"code": 200, "data": {"expired_count": count}})
 
 
-def start_flask_app(ip, port):
+def run(config):
     app.run(host=ip, port=port)
 
+# 用于单独调试HTTP服务器
 # if __name__ == '__main__':
 #     app.run(host="127.0.0.1", port=5000)

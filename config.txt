@@ -2,16 +2,15 @@
 server_ip = 127.0.0.1
 server_port = 9999
 
-# 布隆过滤器初始参数
-# JWT最大有效期
-max_jwt_life_time = 86400
-# 周期轮换时间间隔
-bloom_filter_rotation_time = 10
-# 布隆过滤器的容量（bits）
-bloom_filter_size = 10240
-# 哈希函数个数
-num_hash_function = 10
-
 # HTTP服务器
-http_server_listen_ip = 127.0.0.1
-http_server_listen_port = 5000
+http_server_ip = 127.0.0.1
+http_server_port = 5000
+
+# SQLite数据库
+sqlite_path = C:\MyProjects\JWTRevoker_Controller\sqlite.db
+
+# 布隆过滤器初始参数
+max_jwt_life_time = 86400
+rotation_interval = 30
+bloom_filter_size = 10240
+hash_function_num = 10

@@ -37,7 +37,7 @@ class TCPMsgHub:
             self._watchdog_thread = threading.Thread(target=self._watchdog_as_client,
                                                      args=(ip, port, watchdog_callback))
             self._watchdog_thread.start()
-        # Server mode
+        # AsyncServer mode
         elif sock:
             self._start_listen(sock)
             self._watchdog_thread_run_flag.set()
