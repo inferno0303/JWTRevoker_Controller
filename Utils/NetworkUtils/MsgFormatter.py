@@ -1,7 +1,7 @@
 import json
 
 
-def do_msg_assembly(event, data):
+def do_msg_assembly(event: str, data) -> str:
     """
     Assemble the JSON message.
 
@@ -20,7 +20,7 @@ def do_msg_assembly(event, data):
         return ""
 
 
-def do_msg_parse(json_str):
+def do_msg_parse(json_str: str):
     """
     Parse the JSON message.
 

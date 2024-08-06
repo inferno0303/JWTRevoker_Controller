@@ -1,20 +1,20 @@
 import asyncio
 import struct
-import time
 
 from Utils.NetworkUtils.MsgFormatter import do_msg_assembly, do_msg_parse
 
 
 class AsyncServer:
-    def __init__(self, config, msg_push):
+    def __init__(self, config, mq, msg_pub_sub):
         self.config = config
+
         self.ip = config.get("server_ip", None)
         self.port = config.get("server_port", None)
-        self.clients_status = {}
         if not self.ip or not self.port:
             raise ValueError("The server_ip and server_port in the configuration file are incorrect")
 
-        self.msg_push = msg_push
+        self.mq = mq
+        self.msg_pub_sub = msg_pub_sub
 
     async def run(self):
         try:
@@ -35,8 +35,8 @@ class AsyncServer:
 
         try:
             # 认证
-            auth_msg = await self._do_recv_msg(reader)
-            event, data = do_msg_parse(auth_msg)
+            msg = await self._do_recv(reader)
+            event, data = do_msg_parse(msg)
 
             if event != "hello_from_client":
                 writer.close()
@@ -54,37 +54,33 @@ class AsyncServer:
 
             # 回应
             msg = do_msg_assembly(event="auth_success", data={"client_uid": client_uid})
-            await self._do_send_msg(writer, msg=msg)
-            print(f"验证通过 client_uid: {client_uid}, token: {token}")
+            await self._do_send(writer, msg=msg)
+            print(f"新客户端连接，client_uid: {client_uid}, token: {token}, addr: {addr}")
 
         except Exception as e:
             print(f"Exception occurred while auth to {addr}: {e}")
 
-        # 更新客户端状态
-        self.msg_push[client_uid] = {
-            "master_event": asyncio.Queue(),
-            "node_event": asyncio.Queue()
-        }
-        self.clients_status[client_uid] = {"status": "online", "last_keepalive": int(time.time())}
-        await self.msg_push[client_uid]["node_event"].put(self.clients_status[client_uid])
+        # 将客户端标记为在线
+        self.msg_pub_sub.node_online(node_uid=client_uid, node_ip=addr[0], node_port=addr[1])
 
-        # 接收和发送队列
-        recv_queue = asyncio.Queue()
-        send_queue = asyncio.Queue()
+        # 创建队列
+        self.mq[client_uid] = {
+            "recv_queue": asyncio.Queue(),
+            "send_queue": asyncio.Queue()
+        }
 
         # 客户端关闭标志
         stop_event = asyncio.Event()
 
         # 启动接收、处理、发送消息的协程
-        receive_task = asyncio.create_task(self._receive_coroutines(reader, recv_queue, client_uid, stop_event))
-        process_msg_task = asyncio.create_task(
-            self._process_msg_coroutines(recv_queue, send_queue, client_uid, stop_event)
+        receive_task = asyncio.create_task(
+            self._receive_coro(reader=reader, client_uid=client_uid, stop_event=stop_event)
         )
-        send_task = asyncio.create_task(self._send_coroutines(writer, send_queue, client_uid, stop_event))
-
-        # 订阅和处理来自master的事件，启动协程
-        process_master_event_task = asyncio.create_task(
-            self._process_master_event_coroutines(reader, client_uid, stop_event)
+        process_msg_task = asyncio.create_task(
+            self._process_coro(client_uid=client_uid, stop_event=stop_event)
+        )
+        send_task = asyncio.create_task(
+            self._send_coro(writer=writer, client_uid=client_uid, stop_event=stop_event)
         )
 
         # 等待客户端关闭连接
@@ -94,14 +90,13 @@ class AsyncServer:
         receive_task.cancel()
         process_msg_task.cancel()
         send_task.cancel()
-        process_master_event_task.cancel()
         await receive_task
         await process_msg_task
         await send_task
-        await process_master_event_task
 
         # 将客户端标记为下线
-        del self.clients_status[client_uid]
+        self.msg_pub_sub.node_offline(node_uid=client_uid)
+        del self.mq[client_uid]
 
         # 关闭套接字
         try:
@@ -110,16 +105,12 @@ class AsyncServer:
         except Exception as e:
             print(f"Client uid {client_uid} close connection. {e}")
 
-    async def _receive_coroutines(self, reader, recv_queue, client_uid, stop_event):
+    async def _receive_coro(self, reader, client_uid, stop_event):
         try:
             while True:
-                msg = await self._do_recv_msg(reader)
-                if not msg:
-                    break  # 如果没有数据，说明客户端关闭了连接
-
-                # 将消息放入“已接收消息”队列中
-                await recv_queue.put(msg)
-
+                msg = await self._do_recv(reader)
+                if msg:
+                    await self.mq[client_uid]["recv_queue"].put(msg)
         except asyncio.CancelledError:
             print(f"Receive task was cancelled for {client_uid}")
         except asyncio.IncompleteReadError:
@@ -129,22 +120,34 @@ class AsyncServer:
         finally:
             stop_event.set()
 
-    async def _process_msg_coroutines(self, recv_queue, send_queue, client_uid, stop_event):
+    async def _send_coro(self, writer, client_uid, stop_event):
         try:
             while True:
-                msg = await recv_queue.get()
+                msg = await self.mq[client_uid]["send_queue"].get()
+                if msg:
+                    await self._do_send(writer, msg=msg)
+        except asyncio.CancelledError:
+            print(f"Send task was cancelled for {client_uid}")
+        except Exception as e:
+            print(f"Exception occurred while sending to {client_uid}: {e}")
+        finally:
+            stop_event.set()
+
+    async def _process_coro(self, client_uid, stop_event):
+        try:
+            while True:
+                msg = await self.mq[client_uid]["recv_queue"].get()  # 从接收队列取出消息
                 event, data = do_msg_parse(msg)
 
                 if event == "keepalive":
-                    self.clients_status[client_uid] = {"status": "online", "last_keepalive": int(time.time())}  # 写入秒时间戳
-                    await self.msg_push[client_uid]["node_event"].put(self.clients_status[client_uid])
-                    print(">>>>", self.msg_push)
+                    self.msg_pub_sub.node_keepalive(node_uid=client_uid)
                     continue
 
                 elif event == "node_status":
-                    await self.msg_push[client_uid]["node_event"].put(msg)
+                    # 持久化
+                    self.msg_pub_sub.log_node_msg(node_uid=client_uid, event=event, data=data)
                     msg = do_msg_assembly(event=event + "_received", data={"client_uid": client_uid})
-                    await send_queue.put(msg)
+                    await self.mq[client_uid]["send_queue"].put(msg)
                     continue
 
                 elif event == "get_bloom_filter_default_config":
@@ -156,20 +159,13 @@ class AsyncServer:
                         "hash_function_num": self.config.get("hash_function_num", 5)
                     }
                     msg = do_msg_assembly("bloom_filter_default_config", data)
-                    await send_queue.put(msg)
-                    continue
-
-                elif event == "query":
-                    msg = do_msg_assembly(event=event + "_response", data={"client_uid": client_uid})
-                    await send_queue.put(msg)
+                    await self.mq[client_uid]["send_queue"].put(msg)
                     continue
 
                 else:
-                    msg = do_msg_assembly(event="unknown_event",
-                                          data={"client_uid": client_uid, "received_event": event})
-                    await send_queue.put(msg)
+                    msg = do_msg_assembly(event="unknown_event", data={"client_uid": client_uid})
+                    await self.mq[client_uid]["send_queue"].put(msg)
                     continue
-
         except asyncio.CancelledError:
             print(f"Process msg task was cancelled for {client_uid}")
         except Exception as e:
@@ -177,37 +173,8 @@ class AsyncServer:
         finally:
             stop_event.set()
 
-    async def _send_coroutines(self, writer, send_queue, client_uid, stop_event):
-        try:
-            while True:
-                msg = await send_queue.get()
-                await self._do_send_msg(writer, msg=msg)
-
-        except asyncio.CancelledError:
-            print(f"Send task was cancelled for {client_uid}")
-        except Exception as e:
-            print(f"Exception occurred while sending to {client_uid}: {e}")
-        finally:
-            stop_event.set()
-
-    async def _process_master_event_coroutines(self, writer, client_uid, stop_event):
-        """
-        订阅master产生的消息，处理后发送出去
-        """
-        try:
-            while True:
-                msg = await self.msg_push[client_uid]['master_event'].get()
-                await self._do_send_msg(writer, msg=msg)
-
-        except asyncio.CancelledError:
-            print(f"Send task was cancelled for {client_uid}")
-        except Exception as e:
-            print(f"Exception occurred while sending to {client_uid}: {e}")
-        finally:
-            stop_event.set()
-
     @staticmethod
-    async def _do_recv_msg(reader):
+    async def _do_recv(reader):
         # 1、接收消息头
         msg_header_be = await reader.readexactly(4)
 
@@ -224,7 +191,7 @@ class AsyncServer:
         return msg_body
 
     @staticmethod
-    async def _do_send_msg(writer, msg):
+    async def _do_send(writer, msg):
         if not msg:  # 防止发送空字符串
             return
 

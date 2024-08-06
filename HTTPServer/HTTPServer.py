@@ -5,16 +5,16 @@ import uuid as uuid_lib
 import time
 import random
 import asyncio
-import threading
 
 from DatabaseModel.DatabaseModel import JwtToken
+from Utils.NetworkUtils.MsgFormatter import do_msg_assembly, do_msg_parse
 
 app = Flask(__name__)
 app.static_folder = "./Frontend"
 
 
 class HTTPServer:
-    def __init__(self, config, msg_push):
+    def __init__(self, config, msg_pub_sub):
         # 读取配置
         self.ip = config.get("http_server_ip", None)
         self.port = config.get("http_server_port", None)
@@ -23,14 +23,13 @@ class HTTPServer:
                 "The http_server_ip or http_server_port in the configuration file are incorrect"
             )
 
-        self.msg_push = msg_push
+        self.msg_pub_sub = msg_pub_sub
 
         # 连接数据库
         sqlite_path = config.get("sqlite_path", "").replace("\\", "/")
         if not sqlite_path:
             raise ValueError("The sqlite_path in the configuration file are incorrect")
-
-        self.engine = create_engine(f"sqlite:///{sqlite_path}", echo=True)
+        self.engine = create_engine(f"sqlite:///{sqlite_path}")
         self.session = Session(self.engine)
 
         # 绑定类方法到路由
@@ -42,6 +41,8 @@ class HTTPServer:
         app.add_url_rule("/get_valid_token_count", view_func=self.get_valid_token_count, methods=['GET'])
         app.add_url_rule("/get_revoked_token_count", view_func=self.get_revoked_token_count, methods=['GET'])
         app.add_url_rule("/get_expired_token_count", view_func=self.get_expired_token_count, methods=['GET'])
+        app.add_url_rule("/get_online_nodes", view_func=self.get_online_nodes, methods=['GET'])
+        app.add_url_rule("/send_msg_to_node", view_func=self.send_msg_to_node, methods=['GET'])
 
     def run(self):
         app.run(host=self.ip, port=self.port)
@@ -54,14 +55,6 @@ class HTTPServer:
         """
         查询token（分页查询）
         """
-        for client_uid, queues in self.msg_push.items():
-            print("消息订阅：", client_uid, queues)
-            new_msg = {
-                "event": "master_event",
-                "data": "no data"
-            }
-            asyncio.run_coroutine_threadsafe(queues["master_event"].put(new_msg), asyncio.get_event_loop())
-
         try:
             page_num = int(request.args.get('page_num', 1))
             page_size = int(request.args.get('page_size', 100))
@@ -70,7 +63,7 @@ class HTTPServer:
 
         offset = (page_num - 1) * page_size
 
-        stmt = select(JwtToken).offset(offset).limit(page_size)
+        stmt = select(JwtToken).where(JwtToken.expire_time > int(time.time())).offset(offset).limit(page_size)
         result = self.session.execute(stmt).fetchall()
 
         data = {
@@ -96,7 +89,6 @@ class HTTPServer:
         """
         try:
             uuid = str(request.args.get('uuid', ""))
-            print(uuid)
         except ValueError:
             return jsonify({"code": 400, "message": "Invalid uuid"}), 400
 
@@ -160,7 +152,6 @@ class HTTPServer:
         """
         try:
             uuid = str(request.args.get('uuid', ""))
-            print(uuid)
         except ValueError:
             return jsonify({"code": 400, "message": "Invalid uuid"}), 400
 
@@ -233,3 +224,31 @@ class HTTPServer:
             "count": count
         }
         return jsonify({"code": 200, "data": data})
+
+    def get_online_nodes(self):
+        """
+        获取节点在线状态
+        """
+        online_nodes = self.msg_pub_sub.get_online_nodes()
+        return jsonify({"code": 200, "data": {"online_nodes": online_nodes}})
+
+    def send_msg_to_node(self):
+        """
+        给指定node发送消息
+        """
+        try:
+            node_uid = str(request.args.get('node_uid', ""))
+            event = str(request.args.get('event', ""))
+            data = str(request.args.get('data', ""))
+        except ValueError:
+            return jsonify({"code": 400, "message": "Invalid uuid"}), 400
+
+        msg = do_msg_assembly(event=event, data=data)
+        self.msg_pub_sub.send_msg_to_node(
+            msg_from="http_server",
+            from_uid="http_server",
+            node_uid=node_uid,
+            msg_event=event,
+            msg_data=data
+        )
+        return jsonify({"code": 200, "data": {"node_uid": node_uid, "msg": {"event": event, "data": data}}})
