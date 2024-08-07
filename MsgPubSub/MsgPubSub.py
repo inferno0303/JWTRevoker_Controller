@@ -4,6 +4,8 @@ import time
 import uuid as uuid_lib
 import queue
 import json
+from typing import Union
+
 from sqlalchemy import create_engine, select, insert, update
 from sqlalchemy.orm import Session
 
@@ -122,33 +124,37 @@ class MsgPubSub:
                     })
         return online_nodes
 
-    def send_msg_to_node(self, msg_from: str, from_uid: str, node_uid: str, msg_event: str, msg_data: str) -> bool:
+    def send_msg_to_node(self, msg_from: str, from_uid: str, node_uid: str, msg_event: str,
+                         msg_data: Union[str, dict]) -> bool:
         now = int(time.time())
         uuid = str(uuid_lib.uuid4())
-        # 持久化消息
-        stmt = insert(MsgHistory).values(uuid=uuid, msg_from=msg_from, msg_to="node", from_uid=from_uid,
-                                         to_uid=node_uid, msg_event=msg_event, msg_data=msg_data, post_status=0,
-                                         create_time=now)
-        self.session.execute(stmt)
-        self.session.commit()
+
+        # 如果传入的是dict，则需要转换为str再存到数据库
+        if isinstance(msg_data, dict):
+            _msg_data = json.dumps(msg_data, separators=(',', ':'))  # 转换为str再存到数据库
+        elif isinstance(msg_data, str):
+            _msg_data = msg_data
+        else:
+            _msg_data = str(msg_data)
 
         # 查询是否在线
         node_status = self._get_node_online_status(node_uid=node_uid)
+        # 如果在线，则推送给节点
         if node_status:
-            # 如果在线，则推送给节点
             if self.mq.get(node_uid, None):
                 if self.mq.get(node_uid, None).get("send_queue", None):
                     asyncio_queue = self.mq[node_uid]["send_queue"]  # 找到该节点的消息队列
                     if self.loop:
                         msg = do_msg_assembly(event=msg_event, data=msg_data)
                         asyncio.run_coroutine_threadsafe(asyncio_queue.put(msg), self.loop)  # 推送到消息队列
-                        # 在数据库中将该消息标记为已发送
-                        now = int(time.time())
-                        stmt = update(MsgHistory).where(MsgHistory.uuid == uuid).values(post_status=1, post_time=now)
-                        self.session.execute(stmt)
-                        self.session.commit()
-                        # 返回发送成功标志
                         return True
+        # 如果节点不在线，则持久化，稍后重试
+        else:
+            stmt = insert(MsgHistory).values(uuid=uuid, msg_from=msg_from, msg_to="node", from_uid=from_uid,
+                                             to_uid=node_uid, msg_event=msg_event, msg_data=_msg_data, post_status=0,
+                                             create_time=now)
+            self.session.execute(stmt)
+            self.session.commit()
         return False
 
     def get_node_msg_nowait(self, node_uid: str, mark_read: bool) -> str:

@@ -1,13 +1,15 @@
-import threading
-import asyncio
-import time
-from sqlalchemy import create_engine
+import argparse  # 用于解析启动参数
+import os  # 用于寻找配置文件路径
+import threading  # 用于启动线程
+import asyncio  # 用于支持运行异步IO的TCP服务器
+import time  # 用于等待异步IO服务器启动完成
+from sqlalchemy import create_engine  # 用于检查数据库表
 
-from Utils.ConfigReader import read_config
-from DatabaseModel.DatabaseModel import Base
-from AsyncServer.AsyncServer import AsyncServer
-from MsgPubSub.MsgPubSub import MsgPubSub
-from HTTPServer.HTTPServer import HTTPServer
+from Utils.ConfigReader import load_config  # 读取配置文件
+from DatabaseModel.DatabaseModel import Base  # 数据表模型基类
+from MsgPubSub.MsgPubSub import MsgPubSub  # 消息订阅分发
+from AsyncServer.AsyncServer import AsyncServer  # TCP异步IO服务器
+from HTTPServer.HTTPServer import HTTPServer  # HTTP服务器
 
 
 def start_tcp_server(config, msg_push, loop_holder, msg_pub_sub):
@@ -28,8 +30,20 @@ def start_http_server(config, msg_pub_sub):
 
 
 def main():
+    # 创建解析器
+    parser = argparse.ArgumentParser(description="启动Python程序时读取配置文件")
+
+    # 添加-c参数
+    parser.add_argument('-c', '--config', type=str, help='配置文件的路径')
+
+    # 解析命令行参数
+    args = parser.parse_args()
+
+    # 如果提供了-c参数，使用该路径，否则使用当前目录下的config.txt
+    config_path = args.config if args.config else os.path.join(os.getcwd(), 'config.txt')
+
     # 读取配置文件
-    config = read_config("config.txt")
+    config = load_config(config_path)
 
     # 检查数据库
     sqlite_path = config.get("sqlite_path", "").replace("\\", "/")
@@ -39,13 +53,13 @@ def main():
     engine = create_engine(f"sqlite:///{sqlite_path}")
     Base.metadata.create_all(engine)
 
-    # 协程事件循环
+    # 协程事件循环（用于存储TCP异步IO服务器所在事件循环的loop）
     loop_holder = {}
 
     # 消息队列
     mq = {}
 
-    # 启动消息发布订阅
+    # 启动消息订阅分发
     msg_pub_sub = MsgPubSub(config, mq)
 
     # 启动TCP服务器
@@ -57,7 +71,7 @@ def main():
         time.sleep(0.1)
     loop = loop_holder["tcp_server_loop"]
 
-    # 设置loop
+    # 给消息订阅分发设置loop
     msg_pub_sub.set_loop(loop)
 
     # 启动HTTP服务器

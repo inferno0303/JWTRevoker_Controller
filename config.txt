@@ -11,6 +11,6 @@ sqlite_path = C:\MyProjects\JWTRevoker_Controller\sqlite.db
 
 # 布隆过滤器初始参数
 max_jwt_life_time = 86400
-rotation_interval = 30
+rotation_interval = 3600
 bloom_filter_size = 10240
-hash_function_num = 10
+hash_function_num = 5

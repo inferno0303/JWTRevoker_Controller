@@ -1,4 +1,4 @@
-def read_config(file_path):
+def load_config(file_path):
     config = {}
     with open(file_path, "r", encoding="utf-8") as file:
         for line in file:
