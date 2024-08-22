@@ -1,5 +1,5 @@
-from sqlalchemy import create_engine, select, insert, update, func, text
-from sqlalchemy.orm import Session, Mapper
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session
 import csv
 import os
 from concurrent.futures import ThreadPoolExecutor
