@@ -1,13 +1,15 @@
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, select
 from sqlalchemy.orm import Session
 import csv
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-from DatasetModel import Base, Node_2021
+from DatasetModel import MSRTQps2021, CleaningMSRTQps2021
 
-# 文件路径
-FILE_PATHS = [f"C:\\Users\\xiaobocai\\Downloads\\cluster-trace-microservices-v2021\\data\\Node\\Node_0.csv"]
+# 文件路径（按需修改）
+FILE_PATHS = [
+    f"C:\\MyProjects\\JWTRevoker_Controller\\ProcessDatasetStandaloneScripts\\Dataset\\_msrtqps_2021_msname.csv",
+]
 
 # 数据库连接
 MYSQL_HOST = "localhost"
@@ -15,14 +17,6 @@ MYSQL_PORT = 3306
 MYSQL_USER = "root"
 MYSQL_PASSWORD = "12345678"
 TARGET_DATABASE = "open_dataset"
-
-
-# 统计CSV的行数
-def count_lines_in_csv(path):
-    with open(path, 'r') as file:
-        reader = csv.reader(file)
-        row_count = sum(1 for row in reader)
-    return row_count
 
 
 def _count_lines_in_chunk(file_path, offset, chunk_size):
@@ -71,40 +65,56 @@ def insert_to_db(file_path, line_count):
     engine = create_engine(f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{TARGET_DATABASE}")
 
     # 如果不存在表则创建表
-    Base.metadata.create_all(engine)
+    CleaningMSRTQps2021.metadata.create_all(engine)
 
     # 创建一个会话
     session = Session(engine)
 
-    with open(file_path, newline='') as csvfile:
+    with (open(file_path, newline='') as csvfile):
         reader = csv.reader(csvfile)
         batch = []
         count = 0
+        # 选择前100个节点
+        limit = 101
         for row in reader:
             count += 1
 
             # 跳过第一行
             if count == 1: continue
 
-            batch.append({
-                "timestamp": row[1] if row[1] else -1,
-                "nodeid": row[2],
-                "node_cpu_usage": row[3] if row[3] else -1,
-                "node_memory_usage": row[4] if row[4] else -1,
-            })
+            if count > limit:
+                break
 
-            if len(batch) >= 100000:
-                session.bulk_insert_mappings(Node_2021, batch)
+            # 从原来的数据库中，取出数据
+            stmt = select(MSRTQps2021).where(
+                MSRTQps2021.msname == row[0] and MSRTQps2021.metric == 'providerRPC_MCR')
+            rst = session.execute(stmt).fetchall()
+
+            # 放入新的数据库
+            for i in rst:
+                if i[0].timestamp == -1 or not i[0].timestamp or not i[0].msinstanceid or not i[0].value:
+                    continue
+
+                batch.append({
+                    "timestamp": i[0].timestamp,
+                    "msname": i[0].msname,
+                    "msinstanceid": i[0].msinstanceid,
+                    "metric": i[0].metric,
+                    "value": i[0].value,
+                })
+
+                if len(batch) >= 1:
+                    session.bulk_insert_mappings(CleaningMSRTQps2021, batch)
+                    session.commit()
+                    batch.clear()
+                    print(f"导入进度 {count / limit * 100:.2f}%")
+
+            # 最后一次提交
+            if batch:
+                session.bulk_insert_mappings(CleaningMSRTQps2021, batch)
                 session.commit()
                 batch.clear()
-                print(f"文件 '{os.path.basename(file_path)}' 导入进度 {count / line_count * 100:.2f}%")
-
-        # 最后一次提交
-        if batch:
-            session.bulk_insert_mappings(Node_2021, batch)
-            session.commit()
-            batch.clear()
-            print(f"文件 '{os.path.basename(file_path)}' 导入进度 {count / line_count * 100:.2f}%")
+                print(f"导入进度 {count / limit * 100:.2f}%")
 
 
 def main():

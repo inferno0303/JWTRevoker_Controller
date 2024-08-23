@@ -7,9 +7,9 @@ class Base(DeclarativeBase):
     pass
 
 
-class MSRTQps_2021(Base):
+class MSRTQps2021(Base):
     """
-    阿里巴巴 cluster-trace-microservices-v2021 数据集，来源：https://github.com/alibaba/clusterdata
+    阿里巴巴 cluster-trace-microservices-v2021 msrtqps 数据集，来源：https://github.com/alibaba/clusterdata
     用作请求率
     """
     __tablename__ = "msrtqps_2021"
@@ -25,9 +25,9 @@ class MSRTQps_2021(Base):
         return f"<msrtqps_2021 id: {self.id}, msname: {self.msname}, metric: {self.metric}, value: {self.value}>"
 
 
-class Node_2021(Base):
+class Node2021(Base):
     """
-    阿里巴巴 cluster-trace-microservices-v2021 数据集，来源：https://github.com/alibaba/clusterdata
+    阿里巴巴 cluster-trace-microservices-v2021 node 数据集，来源：https://github.com/alibaba/clusterdata
     用作节点状态（顶点）
     """
     __tablename__ = "node_2021"
@@ -65,3 +65,54 @@ class IWQoS23EdgeMeasurements(Base):
 
     def __repr__(self):
         return f"<iwqos23_edge_measurements id: {self.id}, src_machine_id: {self.src_machine_id}, dst_machine_id: {self.dst_machine_id}, tcp_out_delay: {self.tcp_out_delay}, detect_time: {self.detect_time}>"
+
+
+class CleaningMSRTQps2021(Base):
+    """
+    阿里巴巴 cluster-trace-microservices-v2021 msrtqps 数据集，来源：https://github.com/alibaba/clusterdata
+    用作请求率
+    """
+    __tablename__ = "cleaning_msrtqps_2021"
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True, nullable=False)
+    timestamp = mapped_column(Integer)
+    msname = mapped_column(String(255))
+    msinstanceid = mapped_column(String(255))
+    metric = mapped_column(String(255))
+    value = mapped_column(Float)
+
+    def __repr__(self):
+        return f"<cleaning_msrtqps_2021 id: {self.id}, msname: {self.msname}, metric: {self.metric}, value: {self.value}>"
+
+
+class CleaningNode2021(Base):
+    """
+    阿里巴巴 cluster-trace-microservices-v2021 node 数据集，来源：https://github.com/alibaba/clusterdata
+    用作节点状态（顶点）
+    """
+    __tablename__ = "cleaning_node_2021"
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True, nullable=False)
+    timestamp = mapped_column(Integer)
+    nodeid = mapped_column(String(255))
+    node_cpu_usage = mapped_column(Float)
+    node_memory_usage = mapped_column(Float)
+
+    def __repr__(self):
+        return f"<cleaning_node_2021 id: {self.id}, timestamp: {self.timestamp}, nodeid: {self.nodeid}, node_cpu_usage: {self.node_cpu_usage}, node_memory_usage: {self.node_memory_usage}>"
+
+
+class CleaningMSRTMCR2022(Base):
+    """
+    阿里巴巴 cluster-trace-microservices-v2022 MSRTMCR 数据集，来源：https://github.com/alibaba/clusterdata
+    用作请求率
+    """
+    __tablename__ = "cleaning_msrtmcr_2022"
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True, nullable=False)
+    timestamp = mapped_column(Integer)
+    nodeid = mapped_column(String(255))
+    http_mcr = mapped_column(String(255))
+
+    def __repr__(self):
+        return f"<cleaning_msrtmcr_2022 id: {self.id}, timestamp: {self.timestamp}, nodeid: {self.nodeid}, http_mcr: {self.http_mcr}>"

@@ -1,14 +1,14 @@
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 import csv
-from datetime import datetime
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-from DatasetModel import Base, IWQoS23EdgeMeasurements
+from DatasetModel import MSRTQps2021
 
-# 文件路径
-FILE_PATHS = ["C:\\Users\\xiaobocai\\Downloads\\IWQoS OpenSource\\dataset\\dataset.csv"]
+# 文件路径（按需修改）
+FILE_PATHS = [f"C:\\Users\\xiaobocai\\Downloads\\cluster-trace-microservices-v2021\\data\\MSRTQps\\MSRTQps_{i}.csv"
+              for i in range(0, 25)]  # 文件名从0~24
 
 # 数据库连接
 MYSQL_HOST = "localhost"
@@ -16,14 +16,6 @@ MYSQL_PORT = 3306
 MYSQL_USER = "root"
 MYSQL_PASSWORD = "12345678"
 TARGET_DATABASE = "open_dataset"
-
-
-# 统计CSV的行数
-def count_lines_in_csv(path):
-    with open(path, 'r') as file:
-        reader = csv.reader(file)
-        row_count = sum(1 for row in reader)
-    return row_count
 
 
 def _count_lines_in_chunk(file_path, offset, chunk_size):
@@ -72,7 +64,7 @@ def insert_to_db(file_path, line_count):
     engine = create_engine(f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{TARGET_DATABASE}")
 
     # 如果不存在表则创建表
-    Base.metadata.create_all(engine)
+    MSRTQps2021.metadata.create_all(engine)
 
     # 创建一个会话
     session = Session(engine)
@@ -88,29 +80,22 @@ def insert_to_db(file_path, line_count):
             if count == 1: continue
 
             batch.append({
-                "src_machine_id": row[0],
-                "src_isp": row[1],
-                "src_province": row[2],
-                "src_city": row[3],
-                "dst_machine_id": row[4],
-                "dst_isp": row[5],
-                "dst_province": row[6],
-                "dst_city": row[7],
-                "tcp_out_delay": row[8] if row[8] else -1,
-                "tcp_out_packet_loss": row[9] if row[9] else -1,
-                "hops": row[10] if row[10] else -1,
-                "detect_time": int(datetime.fromisoformat(row[11]).timestamp()) if row[11] else -1
+                "timestamp": row[1] if row[1] else -1,
+                "msname": row[2],
+                "msinstanceid": row[3],
+                "metric": row[4],
+                "value": row[5] if row[5] else -1
             })
 
             if len(batch) >= 100000:
-                session.bulk_insert_mappings(IWQoS23EdgeMeasurements, batch)
+                session.bulk_insert_mappings(MSRTQps2021, batch)
                 session.commit()
                 batch.clear()
                 print(f"文件 '{os.path.basename(file_path)}' 导入进度 {count / line_count * 100:.2f}%")
 
         # 最后一次提交
         if batch:
-            session.bulk_insert_mappings(IWQoS23EdgeMeasurements, batch)
+            session.bulk_insert_mappings(MSRTQps2021, batch)
             session.commit()
             batch.clear()
             print(f"文件 '{os.path.basename(file_path)}' 导入进度 {count / line_count * 100:.2f}%")
