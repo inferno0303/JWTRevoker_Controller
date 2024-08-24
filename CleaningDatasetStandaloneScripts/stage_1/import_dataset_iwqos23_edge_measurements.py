@@ -1,14 +1,16 @@
 from sqlalchemy.orm import declarative_base, mapped_column, Session
 from sqlalchemy import create_engine, text, Integer, String, BigInteger, Index
-import os  # 用于文件系统接口
-import glob  # 用于文件系统接口
+import os
+import glob
 import csv
-from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
+import concurrent.futures
+import time
 import datetime
 from collections import Counter
 
 # 文件路径（按需修改）
-BASE_PATH = "C:\\Users\\xiaobocai\\Downloads\\IWQoS OpenSource"
+BASE_PATH = r"C:\MyProjects\Datasets\IWQoS OpenSource"
 
 # 数据库连接
 MYSQL_HOST = "localhost"
@@ -46,52 +48,21 @@ class IWQoS23EdgeMeasurements(Base):
         return f"<iwqos23_edge_measurements_raw id: {self.id}, src_machine_id: {self.src_machine_id}, dst_machine_id: {self.dst_machine_id}, tcp_out_delay: {self.tcp_out_delay}, detect_time: {self.detect_time}>"
 
 
-def _count_lines_in_chunk(file_path, offset, chunk_size):
-    if chunk_size > 1024 * 1024 * 100:  # 如果文件块大于100MB，则每次最多读取100MB
-        buffer_size = 1024 * 1024 * 100  # 100MB
-    else:
-        buffer_size = chunk_size  # 如果文件块小于等于10MB，则一次性全部读取
-
-    with open(file_path, 'rb') as file:
-        file.seek(offset)
-        buffer = file.read(buffer_size)
-        line_count = 0  # 行计数
-        bytes_read = 0  # 已读字节计数
-        while bytes_read != chunk_size:
-            bytes_read += len(buffer)
-            line_count += buffer.count(b'\n')
-            if chunk_size - bytes_read < buffer_size:
-                buffer = file.read(chunk_size - bytes_read)
-            else:
-                buffer = file.read(buffer_size)
-        return line_count
-
-
-def filter_and_insert(file_path):
-    engine = create_engine(f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/")
-    with engine.connect() as connection:
-        connection.execute(text(f"CREATE DATABASE IF NOT EXISTS {TARGET_DATABASE}"))
-        connection.execute(text(f"USE {TARGET_DATABASE}"))
-    engine = create_engine(f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{TARGET_DATABASE}")
-    IWQoS23EdgeMeasurements.metadata.create_all(engine)
-    session = Session(engine)
-
-    # 统计行数
+def read_csv(file_path, q):
     print(f"正在读取 {os.path.basename(file_path)}")
     with (open(file_path, newline='') as csvfile):
         reader = csv.reader(csvfile)
         for _ in reader: continue
         row_count = reader.line_num
-
     print(f"文件 {os.path.basename(file_path)} 共 {row_count} 行")
 
+    """
+    统计每个 src_machine_id 出现的次数，降序排序，并提取前 100 个的 src_machine_id
+    """
+    counter = Counter()
     with (open(file_path, newline='') as csvfile):
         reader = csv.reader(csvfile)
-
-        # 统计每个 src_machine_id 出现的次数，降序排序，并提取前 100 个的 src_machine_id
-        counter = Counter()
         for row in reader:
-
             # 显示进度
             if reader.line_num % 100000 == 0:
                 print(f"文件 {os.path.basename(file_path)} 分析进度 {reader.line_num / row_count * 100:.2f}%")
@@ -107,22 +78,21 @@ def filter_and_insert(file_path):
 
         print(f"文件 {os.path.basename(file_path)} 分析进度 {reader.line_num / row_count * 100:.2f}%")
 
-        """
-        对全局计数器 counter 进行排序
-        根据 value `频次计数` 进行降序排序
-        如果 value `频次计数` 相同，则根据 key `src_machine_id` 进行升序排序
-        截取前200个，将key `src_machine_id` 放入列表
-        """
-        src_machine_id_list = []
-        for i in sorted(counter.items(), key=lambda item: (-item[1], item[0]))[:200]:
-            src_machine_id_list.append(i[0])
+    """
+    对全局计数器 counter 进行排序
+    根据 value `频次计数` 进行降序排序
+    如果 value `频次计数` 相同，则根据 key `src_machine_id` 进行升序排序
+    截取前200个，将key `src_machine_id` 放入列表
+    """
+    src_machine_id_list = []
+    for i in sorted(counter.items(), key=lambda item: (-item[1], item[0]))[:200]:
+        src_machine_id_list.append(i[0])
 
-    # 读取目标 src_machine_id 行，并批量写入数据库
+    """
+    读取目标 src_machine_id 行，写入队列
+    """
     with (open(file_path, newline='') as csvfile):
         reader = csv.reader(csvfile)
-
-        # 批量写入数据库
-        batch = []
         for row in reader:
 
             # 跳过第一行
@@ -130,7 +100,8 @@ def filter_and_insert(file_path):
 
             # 显示进度
             if reader.line_num % 100000 == 0:
-                print(f"文件 {os.path.basename(file_path)} 写入进度 {reader.line_num / row_count * 100:.2f}%")
+                print(
+                    f"[PID {os.getpid()}] 文件 {os.path.basename(file_path)} 写入进度 {reader.line_num / row_count * 100:.2f}%")
 
             # 忽略 src_machine_id 不在列表中的行
             if not row[0] in src_machine_id_list: continue
@@ -144,12 +115,8 @@ def filter_and_insert(file_path):
             except ValueError:
                 continue
 
-            # 跳过无效数据行
-            for cell in row:
-                if not cell: continue
-
-            # 批量写入数据库
-            batch.append({
+            # 写入队列
+            q.put({
                 "src_machine_id": row[0],
                 "src_isp": row[1],
                 "src_province": row[2],
@@ -163,31 +130,71 @@ def filter_and_insert(file_path):
                 "hops": hops,
                 "detect_time": detect_time,
             })
-            if len(batch) >= 100000:
+
+
+def insert_db(q):
+    # 连接数据库
+    engine = create_engine(f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{TARGET_DATABASE}")
+    with Session(engine) as session:
+        batch = []
+        count = 0
+        while True:
+            item = q.get()
+            if item is not None:  # 检查是否是结束标记
+                count += 1
+                batch.append(item)
+                if len(batch) >= 1000:
+                    session.bulk_insert_mappings(IWQoS23EdgeMeasurements, batch)
+                    session.commit()
+                    batch.clear()
+                    print(f"[PID {os.getpid()}] 累计写入 {count} 条记录到数据库")
+                continue
+
+            if batch:
                 session.bulk_insert_mappings(IWQoS23EdgeMeasurements, batch)
                 session.commit()
                 batch.clear()
+                print(f"[PID {os.getpid()}] 累计写入 {count} 条记录到数据库")
+            break
 
-        # 最后一次提交
-        if batch:
-            session.bulk_insert_mappings(IWQoS23EdgeMeasurements, batch)
-            session.commit()
-            batch.clear()
-
-        print(f"文件 {os.path.basename(file_path)} 写入进度 {reader.line_num / row_count * 100:.2f}%")
-        session.close()
-
+        print(f"[PID {os.getpid()}] 写入数据库完成，累计写入 {count} 条记录")
 
 
 def main():
+    start_time = time.time()
+
+    """
+    创建数据库、创建数据表
+    """
+    engine = create_engine(f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/")
+    with engine.connect() as connection:
+        connection.execute(text(f"CREATE DATABASE IF NOT EXISTS {TARGET_DATABASE}"))
+    engine = create_engine(f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{TARGET_DATABASE}")
+    IWQoS23EdgeMeasurements.metadata.create_all(engine)
+
+    """
+    读取csv文件，并选择对应的 nodeid 行插入到数据库中
+    """
     # 使用 glob 模块查找符合模式的文件
     csv_files = glob.glob(os.path.join(BASE_PATH, "*.csv"))
 
-    # 处理csv文件
-    for csv_file in csv_files:
-        # 筛选CSV数据，并插入到数据库
-        filter_and_insert(os.path.join(BASE_PATH, csv_file))
-        print()
+    manager = multiprocessing.Manager()
+    q = manager.Queue()
+    p = multiprocessing.Process(target=insert_db, args=(q,))
+    p.start()
+    with concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+        futures = []
+        for csv_file in csv_files:
+            futures.append(
+                executor.submit(read_csv, os.path.join(BASE_PATH, csv_file), q)
+            )
+
+        # 等待所有任务完成
+        concurrent.futures.wait(futures)
+
+    # 任务完成后，通知消费者进程退出
+    q.put(None)
+    p.join()
 
     """
     对数据库进行排序
@@ -219,6 +226,8 @@ def main():
     创建数据库索引
     """
     Index('src_machine_id_idx', IWQoS23EdgeMeasurements.src_machine_id).create(engine)
+
+    print(f"执行用时 {int(time.time() - start_time)} 秒")
 
 
 if __name__ == '__main__':
