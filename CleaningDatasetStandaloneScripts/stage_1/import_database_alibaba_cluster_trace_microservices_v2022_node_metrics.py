@@ -1,5 +1,4 @@
-from sqlalchemy.orm import declarative_base, mapped_column, Session
-from sqlalchemy import create_engine, text, Integer, String, BigInteger, Float, Index
+import configparser
 import os
 import glob
 import re
@@ -9,18 +8,23 @@ import queue
 import multiprocessing
 import concurrent.futures
 import csv
-from collections import Counter
 import time
+from collections import Counter
+from sqlalchemy.orm import declarative_base, mapped_column, Session
+from sqlalchemy import create_engine, text, Integer, String, BigInteger, Float, Index
 
-# 文件路径（按需修改）
-BASE_PATH = r"C:\MyProjects\Datasets\cluster-trace-microservices-v2022\data\NodeMetrics"
+config = configparser.ConfigParser()
+config.read('../config.txt')
 
-# 数据库连接
-MYSQL_HOST = "localhost"
-MYSQL_PORT = 3306
-MYSQL_USER = "root"
-MYSQL_PASSWORD = "12345678"
-TARGET_DATABASE = "open_dataset"
+# 数据库
+MYSQL_HOST = config.get('mysql', 'host')
+MYSQL_PORT = config.getint('mysql', 'port')
+MYSQL_USER = config.get('mysql', 'user')
+MYSQL_PASSWORD = config.get('mysql', 'password')
+TARGET_DATABASE = config.get('mysql', 'database')
+
+# 数据集路径
+BASE_PATH = config.get('NodeMetrics', 'base_path')
 
 # 定义表映射
 Base = declarative_base()
@@ -134,7 +138,7 @@ def insert_db(q):
             if item is not None:  # 检查是否是结束标记
                 count += 1
                 batch.append(item)
-                if len(batch) >= 1000:
+                if len(batch) >= 10000:
                     session.bulk_insert_mappings(ClusterTraceMicroservicesV2022NodeMetrics, batch)
                     session.commit()
                     batch.clear()
@@ -267,8 +271,9 @@ def main():
     """
     创建数据库索引
     """
-    print(f"创建索引 {ClusterTraceMicroservicesV2022NodeMetrics.__tablename__}")
+    print(f"创建数据库索引")
     Index('nodeid_idx', ClusterTraceMicroservicesV2022NodeMetrics.nodeid).create(engine)
+    Index('timestamp_idx', ClusterTraceMicroservicesV2022NodeMetrics.timestamp).create(engine)
 
     print(f"执行用时 {int(time.time() - start_time)} 秒")
 

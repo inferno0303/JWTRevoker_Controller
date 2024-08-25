@@ -1,23 +1,29 @@
-from sqlalchemy.orm import declarative_base, mapped_column, Session
-from sqlalchemy import create_engine, text, Integer, String, BigInteger, Index
+import configparser
 import os
 import glob
 import csv
 import multiprocessing
 import concurrent.futures
+import sys
 import time
 import datetime
 from collections import Counter
+from sqlalchemy.orm import declarative_base, mapped_column, Session
+from sqlalchemy import create_engine, text, Integer, String, BigInteger, Index
+from sqlalchemy.testing import future
 
-# 文件路径（按需修改）
-BASE_PATH = r"C:\MyProjects\Datasets\IWQoS OpenSource"
+config = configparser.ConfigParser()
+config.read('../config.txt')
 
-# 数据库连接
-MYSQL_HOST = "localhost"
-MYSQL_PORT = 3306
-MYSQL_USER = "root"
-MYSQL_PASSWORD = "12345678"
-TARGET_DATABASE = "open_dataset"
+# 数据库
+MYSQL_HOST = config.get('mysql', 'host')
+MYSQL_PORT = config.getint('mysql', 'port')
+MYSQL_USER = config.get('mysql', 'user')
+MYSQL_PASSWORD = config.get('mysql', 'password')
+TARGET_DATABASE = config.get('mysql', 'database')
+
+# 数据集路径
+BASE_PATH = config.get('IWQoS23EdgeMeasurements', 'base_path')
 
 # 定义表映射
 Base = declarative_base()
@@ -48,65 +54,109 @@ class IWQoS23EdgeMeasurements(Base):
         return f"<iwqos23_edge_measurements_raw id: {self.id}, src_machine_id: {self.src_machine_id}, dst_machine_id: {self.dst_machine_id}, tcp_out_delay: {self.tcp_out_delay}, detect_time: {self.detect_time}>"
 
 
+def _count_lines_in_chunk(file_path, offset, chunk_size):
+    if chunk_size > 1024 * 1024 * 10:  # 如果文件块大于10MB，则每次最多读取10MB
+        buffer_size = 1024 * 1024 * 10
+    else:
+        buffer_size = chunk_size  # 如果文件块小于等于10MB，则一次性全部读取
+    with open(file_path, 'rb') as file:
+        file.seek(offset)
+        buffer = file.read(buffer_size)
+        line_count = 0  # 行计数
+        bytes_read = 0  # 已读字节计数
+        while bytes_read < chunk_size:
+            bytes_read += len(buffer)
+            line_count += buffer.count(b'\n')  # 累加行数
+            if (chunk_size - bytes_read) >= buffer_size:
+                buffer = file.read(buffer_size)
+            else:
+                buffer = file.read(chunk_size - bytes_read)
+    return line_count
+
+
 def read_csv(file_path, q):
-    print(f"正在读取 {os.path.basename(file_path)}")
-    with (open(file_path, newline='') as csvfile):
-        reader = csv.reader(csvfile)
-        for _ in reader: continue
-        row_count = reader.line_num
-    print(f"文件 {os.path.basename(file_path)} 共 {row_count} 行")
+    """
+    统计csv文件的行数
+    """
+    line_count = 0
+    print(f"正在统计文件 {os.path.basename(file_path)} 的行数")
+
+    num_threads = os.cpu_count()
+    file_size = os.path.getsize(file_path)
+    chunk_size = file_size // num_threads
+    offsets = [[i * chunk_size, chunk_size] for i in range(num_threads)]
+    offsets[-1][1] = chunk_size + file_size - (chunk_size * num_threads)
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=num_threads) as executor:
+        futures = []
+        for [offset, chunk_size] in offsets:
+            fut = executor.submit(_count_lines_in_chunk, file_path, offset, chunk_size)
+            futures.append(fut)
+        for fut in concurrent.futures.as_completed(futures):
+            line_count += fut.result()
+            print(f"文件 {os.path.basename(file_path)} 共 {line_count} 行")
 
     """
-    统计每个 src_machine_id 出现的次数，降序排序，并提取前 100 个的 src_machine_id
+    对边进行计数
     """
-    counter = Counter()
-    with (open(file_path, newline='') as csvfile):
-        reader = csv.reader(csvfile)
+    # 计数器
+    tmp_counter_1 = Counter()
+    tmp_counter_2 = Counter()
+    with open(file_path, newline='') as file:
+        reader = csv.reader(file)
         for row in reader:
-            # 显示进度
-            if reader.line_num % 100000 == 0:
-                print(f"文件 {os.path.basename(file_path)} 分析进度 {reader.line_num / row_count * 100:.2f}%")
+            if reader.line_num % 1000000 == 0:
+                print(f"对边进行计数 {os.path.basename(file_path)} 进度 {reader.line_num / line_count * 100:.2f}%")
+
+            if reader.line_num == 1:
+                continue  # 跳过表头
+
+            src_node = row[0]
+            dst_node = row[4]
+            tmp_counter_1[(src_node, dst_node)] += 1
+            tmp_counter_2[(dst_node, src_node)] += 1
+    edge_counter = tmp_counter_1 + tmp_counter_2
+
+    # 将统计结果按时序信息数量降序排列
+    sorted_edge_counts = sorted(edge_counter.items(), key=lambda x: x[1], reverse=True)
+    print(len(sorted_edge_counts))  # 9428183
+
+    selected_nodes = set()
+    selected_edges = []
+
+    for (src_node, dst_node), count in sorted_edge_counts:
+        if len(selected_nodes) < 200:
+            if src_node not in selected_nodes or dst_node not in selected_nodes:
+                selected_nodes.update([src_node, dst_node])
+                selected_edges.append((src_node, dst_node))
+
+    print(selected_nodes, len(selected_nodes))  # 200
+    print(selected_edges, len(selected_edges))  # 193
+
+    for i in selected_edges:
+        print(i, edge_counter[i])
+
+    """
+    提取在 selected_nodes 中的行，写入队列
+    """
+    with open(file_path, newline='') as file:
+        reader = csv.reader(file)
+        for row in reader:
 
             # 跳过第一行
             if reader.line_num == 1: continue
 
-            # 跳过空的 src_machine_id 行
-            if not row[0]: continue
-
-            # 统计每个 src_machine_id 出现的次数
-            counter[row[0]] += 1
-
-        print(f"文件 {os.path.basename(file_path)} 分析进度 {reader.line_num / row_count * 100:.2f}%")
-
-    """
-    对全局计数器 counter 进行排序
-    根据 value `频次计数` 进行降序排序
-    如果 value `频次计数` 相同，则根据 key `src_machine_id` 进行升序排序
-    截取前200个，将key `src_machine_id` 放入列表
-    """
-    src_machine_id_list = []
-    for i in sorted(counter.items(), key=lambda item: (-item[1], item[0]))[:200]:
-        src_machine_id_list.append(i[0])
-
-    """
-    读取目标 src_machine_id 行，写入队列
-    """
-    with (open(file_path, newline='') as csvfile):
-        reader = csv.reader(csvfile)
-        for row in reader:
-
-            # 跳过第一行
-            if reader.line_num == 1: continue
-
             # 显示进度
             if reader.line_num % 100000 == 0:
-                print(
-                    f"[PID {os.getpid()}] 文件 {os.path.basename(file_path)} 写入进度 {reader.line_num / row_count * 100:.2f}%")
+                print(f"文件 {os.path.basename(file_path)} 写入进度 {reader.line_num / line_count * 100:.2f}%")
 
-            # 忽略 src_machine_id 不在列表中的行
-            if not row[0] in src_machine_id_list: continue
+            # 忽略不在 selected_nodes 中的行
+            src_node = row[0]
+            dst_node = row[4]
+            if src_node not in selected_nodes or dst_node not in selected_nodes:
+                continue
 
-            # 忽略不合法的行
+            # 忽略无效数据
             try:
                 tcp_out_delay = float(row[8])
                 tcp_out_packet_loss = float(row[9])
@@ -117,11 +167,11 @@ def read_csv(file_path, q):
 
             # 写入队列
             q.put({
-                "src_machine_id": row[0],
+                "src_machine_id": src_node,
                 "src_isp": row[1],
                 "src_province": row[2],
                 "src_city": row[3],
-                "dst_machine_id": row[4],
+                "dst_machine_id": dst_node,
                 "dst_isp": row[5],
                 "dst_province": row[6],
                 "dst_city": row[7],
@@ -185,11 +235,8 @@ def main():
     with concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
         futures = []
         for csv_file in csv_files:
-            futures.append(
-                executor.submit(read_csv, os.path.join(BASE_PATH, csv_file), q)
-            )
-
-        # 等待所有任务完成
+            fut = executor.submit(read_csv, os.path.join(BASE_PATH, csv_file), q)
+            futures.append(fut)
         concurrent.futures.wait(futures)
 
     # 任务完成后，通知消费者进程退出
@@ -201,7 +248,6 @@ def main():
     """
     engine = create_engine(f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{TARGET_DATABASE}")
     with engine.connect() as connection:
-        connection.execute(text(f"USE {TARGET_DATABASE}"))
         original_table_name = IWQoS23EdgeMeasurements.__tablename__
         tmp_table_name = f"{IWQoS23EdgeMeasurements.__tablename__}_tmp"
 
@@ -225,7 +271,9 @@ def main():
     """
     创建数据库索引
     """
+    print(f"创建数据库索引")
     Index('src_machine_id_idx', IWQoS23EdgeMeasurements.src_machine_id).create(engine)
+    Index('detect_time_idx', IWQoS23EdgeMeasurements.detect_time).create(engine)
 
     print(f"执行用时 {int(time.time() - start_time)} 秒")
 

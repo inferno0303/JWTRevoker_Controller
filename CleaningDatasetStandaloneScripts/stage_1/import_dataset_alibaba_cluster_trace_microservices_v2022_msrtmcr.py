@@ -1,28 +1,31 @@
-import multiprocessing
-from sqlalchemy.orm import declarative_base, mapped_column, Session
-from sqlalchemy import create_engine, text, Integer, String, Index, select, distinct
+import configparser
 import os
 import glob
 import re
+import multiprocessing
 import tarfile
 import io
 import queue
 import concurrent.futures
 import csv
 import time
-
+from sqlalchemy.orm import declarative_base, mapped_column, Session
+from sqlalchemy import create_engine, text, Integer, String, Index, select, distinct
 from CleaningDatasetStandaloneScripts.stage_1.import_database_alibaba_cluster_trace_microservices_v2022_node_metrics import \
     ClusterTraceMicroservicesV2022NodeMetrics
 
-# 文件路径（按需修改）
-BASE_PATH = r"C:\MyProjects\Datasets\cluster-trace-microservices-v2022\data\MSRTMCR"
+config = configparser.ConfigParser()
+config.read('../config.txt')
 
-# 数据库连接
-MYSQL_HOST = "localhost"
-MYSQL_PORT = 3306
-MYSQL_USER = "root"
-MYSQL_PASSWORD = "12345678"
-TARGET_DATABASE = "open_dataset"
+# 数据库
+MYSQL_HOST = config.get('mysql', 'host')
+MYSQL_PORT = config.getint('mysql', 'port')
+MYSQL_USER = config.get('mysql', 'user')
+MYSQL_PASSWORD = config.get('mysql', 'password')
+TARGET_DATABASE = config.get('mysql', 'database')
+
+# 数据集路径
+BASE_PATH = config.get('MSRTMCR', 'base_path')
 
 # 定义表映射
 Base = declarative_base()
@@ -56,7 +59,7 @@ def read_csv_in_tar(tar_file, selected_nodeid, q):
                 csv_reader = csv.reader(io.TextIOWrapper(tar_reader, encoding='utf-8'))
 
                 # 遍历csv文件，聚合单个时间内所有的nodeid记录，写入队列
-                print(f"[PID {os.getpid()}] 正在读取csv文件 {member.name}")
+                print(f"[PID {os.getpid()}] 正在筛选csv文件对应的内容 {member.name}")
                 d = {}  # 这个字典是 {"timestamp1": {"nodeid": n, ...}, "timestamp2": {"nodeid": n, ...}, ...}
                 for row in csv_reader:
 
