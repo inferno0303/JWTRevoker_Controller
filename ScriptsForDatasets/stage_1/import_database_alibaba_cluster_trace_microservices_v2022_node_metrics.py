@@ -10,8 +10,10 @@ import concurrent.futures
 import csv
 import time
 from collections import Counter
-from sqlalchemy.orm import declarative_base, mapped_column, Session
-from sqlalchemy import create_engine, text, Integer, String, BigInteger, Float, Index
+from sqlalchemy import create_engine, text, Index
+from sqlalchemy.orm import Session
+
+from ScriptsForDatasets.TableMappers import ClusterTraceMicroservicesV2022NodeMetrics
 
 config = configparser.ConfigParser()
 config.read('../config.txt')
@@ -25,26 +27,6 @@ TARGET_DATABASE = config.get('mysql', 'database')
 
 # 数据集路径
 BASE_PATH = config.get('NodeMetrics', 'base_path')
-
-# 定义表映射
-Base = declarative_base()
-
-
-class ClusterTraceMicroservicesV2022NodeMetrics(Base):
-    """
-    阿里巴巴 cluster-trace-microservices-v2022 NodeMetrics 数据集，来源：https://github.com/alibaba/clusterdata
-    用作节点状态（顶点）
-    """
-    __tablename__ = "cluster_trace_microservices_v2022_node_metrics"
-
-    id = mapped_column(Integer, primary_key=True, autoincrement=True, nullable=False)
-    timestamp = mapped_column(BigInteger)
-    nodeid = mapped_column(String(255))
-    cpu_utilization = mapped_column(Float)
-    memory_utilization = mapped_column(Float)
-
-    def __repr__(self):
-        return f"<cluster_trace_microservices_v2022_msrtmcr_raw id: {self.id}, timestamp: {self.timestamp}, nodeid: {self.nodeid}, http_mcr: {self.http_mcr}>"
 
 
 def extractfile_read_csv(tar_file):
@@ -60,14 +42,12 @@ def extractfile_read_csv(tar_file):
                 tar_reader = tar.extractfile(member)
                 csv_reader = csv.reader(io.TextIOWrapper(tar_reader, encoding='utf-8'))
 
-                print(f"正在分析 {member.name}")
+                print(f"正在读取 {member.name}")
 
                 # 统计 nodeid 频率
                 counter = Counter()
                 for row in csv_reader:
                     counter[row[1]] += 1
-
-                print(f"分析完成 {member.name}")
 
                 rst.append({
                     "tar_file": tar_file,
@@ -86,10 +66,6 @@ def read_csv_in_tar(csv_metadata, selected_nodeid, q):
     member = csv_metadata.get("member")
     row_count = csv_metadata.get("row_count")
 
-    # 连接数据库
-    engine = create_engine(f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{TARGET_DATABASE}")
-    session = Session(engine)
-
     with tarfile.open(tar_file, 'r:gz') as tar:
         tar_reader = tar.extractfile(tar.getmember(member.name))
         csv_reader = csv.reader(io.TextIOWrapper(tar_reader, encoding='utf-8'))
@@ -103,10 +79,10 @@ def read_csv_in_tar(csv_metadata, selected_nodeid, q):
             # 显示进度
             if csv_reader.line_num % 1000000 == 0:
                 print(
-                    f"[PID {os.getpid()}] 将 {member.name} 写入队列，进度 {csv_reader.line_num / row_count * 100:.2f}%")
+                    f"[PID {os.getpid()}] 处理 {member.name} 进度 {csv_reader.line_num / row_count * 100:.2f}%")
 
             # 忽略 nodeid 不在列表中的行
-            if not row[1] in selected_nodeid: continue
+            if row[1] not in selected_nodeid: continue
 
             # 忽略不合法的行
             try:
@@ -124,11 +100,10 @@ def read_csv_in_tar(csv_metadata, selected_nodeid, q):
                 "memory_utilization": memory_utilization
             })
 
-        print(f"[PID {os.getpid()}] 将 {member.name} 写入队列，进度 {csv_reader.line_num / row_count * 100:.2f}%")
+        print(f"[PID {os.getpid()}] 处理 {member.name} 进度 {csv_reader.line_num / row_count * 100:.2f}%")
 
 
-def insert_db(q):
-    # 连接数据库
+def insert_db(q, table_mapper):
     engine = create_engine(f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{TARGET_DATABASE}")
     with Session(engine) as session:
         batch = []
@@ -136,17 +111,18 @@ def insert_db(q):
         while True:
             item = q.get()
             if item is not None:  # 检查是否是结束标记
-                count += 1
                 batch.append(item)
                 if len(batch) >= 10000:
-                    session.bulk_insert_mappings(ClusterTraceMicroservicesV2022NodeMetrics, batch)
+                    count += len(batch)
+                    session.bulk_insert_mappings(table_mapper, batch)
                     session.commit()
                     batch.clear()
                     print(f"[PID {os.getpid()}] 累计写入 {count} 条记录到数据库")
                 continue
 
             if batch:
-                session.bulk_insert_mappings(ClusterTraceMicroservicesV2022NodeMetrics, batch)
+                count += len(batch)
+                session.bulk_insert_mappings(table_mapper, batch)
                 session.commit()
                 batch.clear()
                 print(f"[PID {os.getpid()}] 累计写入 {count} 条记录到数据库")
@@ -219,16 +195,16 @@ def main():
     截取前200个，将key `nodeid` 放入列表
     """
     nodeid_list = []
-    for i in sorted(counter.items(), key=lambda item: (-item[1], item[0]))[:200]:
-        nodeid_list.append(i[0])
+    for [k, _] in sorted(counter.items(), key=lambda item: (-item[1], item[0]))[:200]:
+        nodeid_list.append(k)
 
     """
     读取csv文件，并选择对应的 nodeid 行插入到数据库中
     """
     manager = multiprocessing.Manager()
     q = manager.Queue()
-    p = multiprocessing.Process(target=insert_db, args=(q,))
-    p.start()
+    insert_db_p = multiprocessing.Process(target=insert_db, args=(q, ClusterTraceMicroservicesV2022NodeMetrics))
+    insert_db_p.start()
     with concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
         futures = []
         while not csv_queue.empty():
@@ -239,7 +215,7 @@ def main():
 
     # 任务完成后，通知消费者进程退出
     q.put(None)
-    p.join()
+    insert_db_p.join()
 
     """
     对数据库进行排序

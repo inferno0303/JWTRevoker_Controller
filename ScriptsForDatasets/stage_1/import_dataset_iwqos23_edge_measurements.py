@@ -4,13 +4,13 @@ import glob
 import csv
 import multiprocessing
 import concurrent.futures
-import sys
 import time
 import datetime
 from collections import Counter
-from sqlalchemy.orm import declarative_base, mapped_column, Session
-from sqlalchemy import create_engine, text, Integer, String, BigInteger, Index
-from sqlalchemy.testing import future
+from sqlalchemy import create_engine, text, Index
+from sqlalchemy.orm import Session
+
+from ScriptsForDatasets.TableMappers import IWQoS23EdgeMeasurements
 
 config = configparser.ConfigParser()
 config.read('../config.txt')
@@ -24,34 +24,6 @@ TARGET_DATABASE = config.get('mysql', 'database')
 
 # 数据集路径
 BASE_PATH = config.get('IWQoS23EdgeMeasurements', 'base_path')
-
-# 定义表映射
-Base = declarative_base()
-
-
-class IWQoS23EdgeMeasurements(Base):
-    """
-    IWQoS23EdgeMeasurements 数据集，来源：https://github.com/henrycoding/IWQoS23EdgeMeasurements
-    用作节点集群网络延迟（边权）
-    """
-    __tablename__ = "iwqos23_edge_measurements"
-
-    id = mapped_column(Integer, primary_key=True, autoincrement=True, nullable=False)
-    src_machine_id = mapped_column(String(255))
-    src_isp = mapped_column(String(255))
-    src_province = mapped_column(String(255))
-    src_city = mapped_column(String(255))
-    dst_machine_id = mapped_column(String(255))
-    dst_isp = mapped_column(String(255))
-    dst_province = mapped_column(String(255))
-    dst_city = mapped_column(String(255))
-    tcp_out_delay = mapped_column(Integer)
-    tcp_out_packet_loss = mapped_column(Integer)
-    hops = mapped_column(Integer)
-    detect_time = mapped_column(BigInteger)
-
-    def __repr__(self):
-        return f"<iwqos23_edge_measurements_raw id: {self.id}, src_machine_id: {self.src_machine_id}, dst_machine_id: {self.dst_machine_id}, tcp_out_delay: {self.tcp_out_delay}, detect_time: {self.detect_time}>"
 
 
 def _count_lines_in_chunk(file_path, offset, chunk_size):
@@ -182,8 +154,7 @@ def read_csv(file_path, q):
             })
 
 
-def insert_db(q):
-    # 连接数据库
+def insert_db(q, table_mapper):
     engine = create_engine(f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{TARGET_DATABASE}")
     with Session(engine) as session:
         batch = []
@@ -191,17 +162,18 @@ def insert_db(q):
         while True:
             item = q.get()
             if item is not None:  # 检查是否是结束标记
-                count += 1
                 batch.append(item)
                 if len(batch) >= 1000:
-                    session.bulk_insert_mappings(IWQoS23EdgeMeasurements, batch)
+                    count += len(batch)
+                    session.bulk_insert_mappings(table_mapper, batch)
                     session.commit()
                     batch.clear()
                     print(f"[PID {os.getpid()}] 累计写入 {count} 条记录到数据库")
                 continue
 
             if batch:
-                session.bulk_insert_mappings(IWQoS23EdgeMeasurements, batch)
+                count += len(batch)
+                session.bulk_insert_mappings(table_mapper, batch)
                 session.commit()
                 batch.clear()
                 print(f"[PID {os.getpid()}] 累计写入 {count} 条记录到数据库")
@@ -230,8 +202,8 @@ def main():
 
     manager = multiprocessing.Manager()
     q = manager.Queue()
-    p = multiprocessing.Process(target=insert_db, args=(q,))
-    p.start()
+    insert_db_p = multiprocessing.Process(target=insert_db, args=(q, IWQoS23EdgeMeasurements))
+    insert_db_p.start()
     with concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
         futures = []
         for csv_file in csv_files:
@@ -241,7 +213,7 @@ def main():
 
     # 任务完成后，通知消费者进程退出
     q.put(None)
-    p.join()
+    insert_db_p.join()
 
     """
     对数据库进行排序
