@@ -73,8 +73,8 @@ class MsgHistory(Base):
     msg_to = mapped_column(String(255), nullable=False)
     from_uid = mapped_column(String(255), nullable=False)
     to_uid = mapped_column(String(255), nullable=False)
-    msg_event = mapped_column(String(255), nullable=False)  # 消息的event字段
-    msg_data = mapped_column(String(65535), nullable=False)  # 消息的data字段
+    event = mapped_column(String(255), nullable=False)  # 消息的event字段
+    data = mapped_column(String(65535), nullable=False)  # 消息的data字段
     post_status = mapped_column(Integer, default=0, nullable=False)  # 0代表未投递成功，1代表投递成功
     create_time = mapped_column(Integer, nullable=False)
     post_time = mapped_column(Integer)

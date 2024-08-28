@@ -1,34 +1,42 @@
+import configparser
 from flask import Flask, jsonify, request
-from sqlalchemy import create_engine, select, insert, update, func
+from sqlalchemy import create_engine, select, insert, update, func, text
 from sqlalchemy.orm import Session
 import uuid as uuid_lib
 import time
 import random
 
-from DatabaseModel.DatabaseModel import JwtToken
+from DatabaseModel.DatabaseModel import JwtToken, NodeOnlineStatue
 
 app = Flask(__name__)
 app.static_folder = "./Frontend"
 
 
 class HTTPServer:
-    def __init__(self, config, msg_pub_sub):
-        # 读取配置
-        self.ip = config.get("http_server_ip", None)
-        self.port = config.get("http_server_port", None)
-        if not self.ip or not self.port:
-            raise Exception(
-                "The http_server_ip or http_server_port in the configuration file are incorrect"
-            )
-
-        self.msg_pub_sub = msg_pub_sub
-
-        # 连接数据库
-        sqlite_path = config.get("sqlite_path", "").replace("\\", "/")
+    def __init__(self, config_path, event_q):
+        # 读取配置文件
+        config = configparser.ConfigParser()
+        config.read(config_path, encoding='utf-8')
+        sqlite_path = config.get('sqlite', 'sqlite_path', fallback=None)
         if not sqlite_path:
-            raise ValueError("The sqlite_path in the configuration file are incorrect")
-        self.engine = create_engine(f"sqlite:///{sqlite_path}")
-        self.session = Session(self.engine)
+            raise ValueError(f"SQLite数据库配置不正确，请检查配置文件 {config_path}")
+
+        # 检查数据表，如果不存在则创建数据表
+        engine = create_engine(f"sqlite:///{sqlite_path}")
+        JwtToken.metadata.create_all(engine)
+        NodeOnlineStatue.metadata.create_all(engine)
+
+        ip = config.get('http_server', 'http_server_ip', fallback='')
+        port = config.get('http_server', 'http_server_port', fallback=0)
+        if not ip or not port:
+            raise ValueError(f"HTTP Server配置不正确，请检查配置文件 {config_path}")
+
+        # 成员变量
+        self.engine = engine
+        self.session = Session(engine)
+        self.ip = ip
+        self.port = port
+        self.event_q = event_q
 
         # 绑定类方法到路由
         # 访问前端网页
@@ -43,7 +51,7 @@ class HTTPServer:
         app.add_url_rule("/get_token_by_uuid", view_func=self.get_token_by_uuid, methods=['GET'])
         # 获取新的Token
         app.add_url_rule("/get_new_token", view_func=self.get_new_token, methods=['GET'])
-        # 撤回指定的Token
+        # 撤回指定的Token（需要向节点发送消息）
         app.add_url_rule("/revoke_token_by_uuid", view_func=self.revoke_token_by_uuid, methods=['GET'])
         # 查询有效Token数量
         app.add_url_rule("/get_valid_token_count", view_func=self.get_valid_token_count, methods=['GET'])
@@ -53,12 +61,12 @@ class HTTPServer:
         app.add_url_rule("/get_expired_token_count", view_func=self.get_expired_token_count, methods=['GET'])
         # 查询在线节点列表
         app.add_url_rule("/get_online_nodes", view_func=self.get_online_nodes, methods=['GET'])
-        # 向节点发送消息
+        # 向节点发送消息（需要向节点发送消息）
         app.add_url_rule("/send_msg_to_node", view_func=self.send_msg_to_node, methods=['GET'])
-        # 生成指定的Token
+        # 生成指定的Token（需要向节点发送消息）
         app.add_url_rule("/get_new_token_by_args", view_func=self.get_new_token_by_args, methods=['GET'])
 
-    def run(self):
+    def run_forever(self):
         app.run(host=self.ip, port=self.port)
 
     @staticmethod
@@ -228,34 +236,34 @@ class HTTPServer:
 
     def revoke_token_by_uuid(self):
         """
-        撤回一个token，并通过MsgPubSub给节点发送消息
+        撤回一个token（需要向节点发送消息）
         """
         try:
-            uuid = str(request.args.get('uuid', ""))
+            uuid = str(request.args.get("uuid", ""))
         except ValueError:
             return jsonify({"code": 400, "message": "Invalid uuid"}), 400
 
         stmt = select(JwtToken).where(JwtToken.uuid == uuid)
         rst = self.session.execute(stmt).fetchone()
-
         if not rst:
             return jsonify({"code": 200, "message": "uuid error"})
-
         elif rst[0].expire_time < int(time.time()):
             return jsonify({"code": 200, "message": "token has been expired"})
-
         elif rst[0].revoke_flag != 0:
             return jsonify({"code": 200, "message": "token has been revoked"})
-
         else:
             # 给节点发送撤回消息
-            msg_data = {"token": rst[0].uuid, "exp_time": rst[0].expire_time}
-            self.msg_pub_sub.send_msg_to_node(msg_from="master", from_uid="master", node_uid=rst[0].node_uid,
-                                              msg_event="revoke",
-                                              msg_data=msg_data)
+            self.event_q.put({
+                "msg_from": "master",
+                "from_uid": "master",
+                "node_uid": rst[0].node_uid,
+                "event": "revoke_jwt",
+                "data": {"token": rst[0].uuid, "exp_time": rst[0].expire_time}
+            })
 
             # 更新JwtToken数据库
-            stmt = update(JwtToken).where(JwtToken.uuid == uuid).values(revoke_flag=1, revoke_time=int(time.time()))
+            now = int(time.time())
+            stmt = update(JwtToken).where(JwtToken.uuid == uuid).values(revoke_flag=1, revoke_time=now)
             rowcount = self.session.execute(stmt).rowcount
             self.session.commit()
 
@@ -285,9 +293,7 @@ class HTTPServer:
         """
         stmt = select(func.count(JwtToken.id)).where(JwtToken.expire_time > int(time.time()), JwtToken.revoke_flag == 0)
         count = self.session.execute(stmt).fetchone()[0]
-        data = {
-            "count": count
-        }
+        data = {"count": count}
         return jsonify({"code": 200, "data": data})
 
     def get_revoked_token_count(self):
@@ -296,9 +302,7 @@ class HTTPServer:
         """
         stmt = select(func.count(JwtToken.id)).where(JwtToken.expire_time > int(time.time()), JwtToken.revoke_flag == 1)
         count = self.session.execute(stmt).fetchone()[0]
-        data = {
-            "count": count
-        }
+        data = {"count": count}
         return jsonify({"code": 200, "data": data})
 
     def get_expired_token_count(self):
@@ -316,8 +320,12 @@ class HTTPServer:
         """
         获取节点在线状态
         """
-        online_nodes = self.msg_pub_sub.get_online_nodes()
-        return jsonify({"code": 200, "data": {"online_nodes": online_nodes}})
+        stmt = select(NodeOnlineStatue.node_uid, NodeOnlineStatue.node_status, NodeOnlineStatue.node_ip,
+                      NodeOnlineStatue.node_port, NodeOnlineStatue.last_keepalive, NodeOnlineStatue.last_update)
+        rst = self.session.execute(stmt).fetchall()
+        for i in rst:
+            print(i)
+        return jsonify({"code": 200, "data": {"online_nodes": str(rst)}})
 
     def send_msg_to_node(self):
         """
@@ -330,13 +338,13 @@ class HTTPServer:
         except ValueError:
             return jsonify({"code": 400, "message": "Invalid uuid"}), 400
 
-        self.msg_pub_sub.send_msg_to_node(
-            msg_from="http_server",
-            from_uid="http_server",
-            node_uid=node_uid,
-            msg_event=event,
-            msg_data=data
-        )
+        self.event_q.put({
+            "msg_from": "master",
+            "from_uid": "master",
+            "node_uid": node_uid,
+            "event": event,
+            "data": data
+        })
         return jsonify({"code": 200, "data": {"node_uid": node_uid, "msg": {"event": event, "data": data}}})
 
     def get_new_token_by_args(self):
@@ -363,8 +371,9 @@ class HTTPServer:
         # 如果这个Token已经被撤回，则检查撤回时间是否正确
         if revoke_flag == 1 and revoke_time and (revoke_time < create_time or revoke_time > expire_time):
             return jsonify({"code": 400, "message": "The revoke_time must be between create_time and expire_time"}), 400
+
         elif revoke_flag == 1 and not revoke_time:
-            revoke_time = random.randint(create_time, expire_time)
+            revoke_time = int(time.time())
 
         uuid = str(uuid_lib.uuid4())
         jwt_token = uuid
@@ -376,10 +385,14 @@ class HTTPServer:
 
         # 给节点发送撤回消息
         if expire_time > int(time.time()):
-            msg_data = {"token": uuid, "exp_time": expire_time}
-            self.msg_pub_sub.send_msg_to_node(msg_from="master", from_uid="master", node_uid=node_uid,
-                                              msg_event="revoke",
-                                              msg_data=msg_data)
+            data = {"token": uuid, "exp_time": expire_time}
+            self.event_q.put({
+                "msg_from": "master",
+                "from_uid": "master",
+                "node_uid": node_uid,
+                "event": "revoke_jwt",
+                "data": data
+            })
 
         data = {
             "rowcount": rowcount,
