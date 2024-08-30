@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 import uuid as uuid_lib
 import time
 import random
+import json
 
 from DatabaseModel.DatabaseModel import JwtToken, NodeOnlineStatue
 
@@ -343,7 +344,7 @@ class HTTPServer:
             "from_uid": "master",
             "node_uid": node_uid,
             "event": event,
-            "data": data
+            "data": json.loads(data)
         })
         return jsonify({"code": 200, "data": {"node_uid": node_uid, "msg": {"event": event, "data": data}}})
 

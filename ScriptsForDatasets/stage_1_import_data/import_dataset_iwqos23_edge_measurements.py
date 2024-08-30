@@ -91,7 +91,7 @@ def read_csv(file_path, q):
 
     # 将统计结果按时序信息数量降序排列
     sorted_edge_counts = sorted(edge_counter.items(), key=lambda x: x[1], reverse=True)
-    print(len(sorted_edge_counts))  # 9428183
+    print(len(sorted_edge_counts))  # 14018072
 
     selected_nodes = set()
     selected_edges = []
@@ -103,7 +103,7 @@ def read_csv(file_path, q):
                 selected_edges.append((src_node, dst_node))
 
     print(selected_nodes, len(selected_nodes))  # 200
-    print(selected_edges, len(selected_edges))  # 193
+    print(selected_edges, len(selected_edges))  # 194
 
     for i in selected_edges:
         print(i, edge_counter[i])

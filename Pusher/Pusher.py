@@ -70,7 +70,6 @@ class Pusher:
     def listen_event_q(self):  # 监听 event_q 队列，从 HTTP Server 传递的消息
         while True:
             message = self.event_q.get()
-            print(f"监听到从HTTP进程发送的消息 {message}")
             if message is None: break
             msg_from = message.get("msg_from", None)
             from_uid = message.get("from_uid", None)
@@ -127,7 +126,6 @@ class Pusher:
 
     def _send_event(self, msg_from: str, from_uid: str, node_uid: str, event: str, data: str) -> None:
         post_status = 0  # 推送成功标志
-        print(f"_send_event逻辑：{self.local_cache}")
         if node_uid in self.local_cache:  # 先查询缓存
             if self.local_cache[node_uid]:
                 # 节点在线，直接推送给 to_node_q

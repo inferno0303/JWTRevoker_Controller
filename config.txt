@@ -16,5 +16,5 @@ http_server_port = 5000
 [bloomfilter]
 max_jwt_life_time = 86400
 rotation_interval = 3600
-bloom_filter_size = 10240
+bloom_filter_size = 10240000
 hash_function_num = 5

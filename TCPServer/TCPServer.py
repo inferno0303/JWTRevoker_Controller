@@ -70,6 +70,13 @@ class TCPServer:
                     if event == "revoke_jwt":  # 如果是撤回消息，直接发送给节点
                         msg = do_msg_assembly(event, data)
                         asyncio.run_coroutine_threadsafe(self.channel[node_uid]["send_queue"].put(msg), self.loop)
+                        continue
+
+                    if event == "adjust_bloom_filter":
+                        msg = do_msg_assembly(event, data)
+                        asyncio.run_coroutine_threadsafe(self.channel[node_uid]["send_queue"].put(msg), self.loop)
+                        continue
+
 
     async def _handle_client(self, reader, writer):
         addr = writer.get_extra_info('peername')
@@ -209,7 +216,6 @@ class TCPServer:
         try:
             while True:
                 msg = await self.channel[client_uid]["send_queue"].get()
-                print(f"发送：{msg}")
                 if msg:
                     await self._do_send(writer, msg)
         except asyncio.CancelledError:
