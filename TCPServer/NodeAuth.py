@@ -1,7 +1,7 @@
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from DatabaseModel.DatabaseModel import Node
+from DatabaseModel.DatabaseModel import NodeAuth
 
 
 class NodeAuth:
@@ -16,7 +16,7 @@ class NodeAuth:
         self.session = Session(self.engine)
 
     def node_login(self, node_uid: str, node_token: str) -> bool:
-        stmt = select(Node).where(node_uid=node_uid, node_token=node_token)
+        stmt = select(NodeAuth).where(node_uid=node_uid, node_token=node_token)
         rst = self.session.execute(stmt).fetchone()
         if rst:
             return True

@@ -3,8 +3,11 @@ import threading
 import asyncio
 import struct
 import time
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 
 from Utils.NetworkUtils.MsgFormatter import do_msg_assembly, do_msg_parse
+from DatabaseModel.DatabaseModel import NodeAuth
 
 
 class TCPServer:
@@ -12,13 +15,22 @@ class TCPServer:
         # 读取配置文件
         config = configparser.ConfigParser()
         config.read(config_path, encoding='utf-8')
+        sqlite_path = config.get('sqlite', 'sqlite_path', fallback=None)
+        if not sqlite_path:
+            raise ValueError(f"SQLite数据库配置不正确，请检查配置文件 {config_path}")
         ip = config.get('tcp_server', 'tcp_server_ip', fallback='')
         port = config.get('tcp_server', 'tcp_server_port', fallback=0)
         if not ip or not port:
             raise ValueError(f"TCP Server配置不正确，请检查配置文件 {config_path}")
 
+        # 检查数据表，如果不存在则创建数据表
+        engine = create_engine(f"sqlite:///{sqlite_path}")
+        NodeAuth.metadata.create_all(engine)
+
         # 成员变量
         self.config = config
+        self.engine = engine
+        self.session = Session(engine)
         self.ip = ip
         self.port = port
         self.from_node_q = from_node_q
@@ -77,7 +89,6 @@ class TCPServer:
                         asyncio.run_coroutine_threadsafe(self.channel[node_uid]["send_queue"].put(msg), self.loop)
                         continue
 
-
     async def _handle_client(self, reader, writer):
         addr = writer.get_extra_info('peername')
         print(f"接受来自 {addr} 的新连接")
@@ -102,6 +113,13 @@ class TCPServer:
                 await writer.wait_closed()
                 return
 
+            stmt = select(NodeAuth).where(NodeAuth.node_uid == f"{client_uid}", NodeAuth.node_token == f"{token}")
+            if not self.session.execute(stmt).fetchone():  # 验证 client_uid 和 token 是否正确
+                print("Incorrect client_uid or token")
+                writer.close()
+                await writer.wait_closed()
+                return
+
             msg = do_msg_assembly(event="auth_success", data={"client_uid": client_uid})
             await self._do_send(writer, msg=msg)  # 回复认证成功消息
             print(f"新客户端连接，client_uid: {client_uid}, token: {token}, addr: {addr}")
@@ -113,7 +131,7 @@ class TCPServer:
         self.from_node_q.put({
             "node_uid": client_uid,
             "event": "client_online",
-            "data": {"node_ip": addr[0], "node_port": addr[1]}
+            "data": {"node_ip": addr[0]}  # 记录来源IP
         })
 
         """3、在 channel 里创建队列"""
@@ -171,20 +189,22 @@ class TCPServer:
         try:
             while True:
                 msg = await self.channel[client_uid]["recv_queue"].get()
-                event, data = do_msg_parse(msg)
+                event, data = do_msg_parse(msg)  # 此时 data 为 dict 类型
 
+                """节点心跳事件"""
                 if event == "keepalive":
                     self.from_node_q.put({
                         "node_uid": client_uid,
-                        "event": "client_online",
-                        "data": {"node_ip": "127.0.0.1", "node_port": 9999}
+                        "event": event,
+                        "data": data
                     })
                     continue
 
-                if event == "node_status":
+                """布隆过滤器状态上报事件"""
+                if event == "bloom_filter_status":
                     self.from_node_q.put({
                         "node_uid": client_uid,
-                        "event": "node_status",
+                        "event": event,
                         "data": data
                     })
                     continue
@@ -198,7 +218,7 @@ class TCPServer:
                         "hash_function_num": self.config.get("bloomfilter", "hash_function_num", fallback=5)
                     }
                     msg = do_msg_assembly("bloom_filter_default_config", data)
-                    await self.channel[client_uid]["send_queue"].put(msg)
+                    await self.channel[client_uid]["send_queue"].put(msg)  # 回复消息
                     continue
 
                 msg = do_msg_assembly(event="unknown_event", data={"event": str(event)})
