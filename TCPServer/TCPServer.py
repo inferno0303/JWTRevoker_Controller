@@ -22,10 +22,7 @@ class TCPServer:
         port = config.get('tcp_server', 'tcp_server_port', fallback=0)
         if not ip or not port:
             raise ValueError(f"TCP Server配置不正确，请检查配置文件 {config_path}")
-
-        # 检查数据表，如果不存在则创建数据表
         engine = create_engine(f"sqlite:///{sqlite_path}")
-        NodeAuth.metadata.create_all(engine)
 
         # 成员变量
         self.config = config
@@ -91,10 +88,6 @@ class TCPServer:
 
     async def _handle_client(self, reader, writer):
         addr = writer.get_extra_info('peername')
-        print(f"接受来自 {addr} 的新连接")
-
-        # 存储当前连接的 client_uid
-        client_uid = None
 
         """1、认证流程"""
         try:
@@ -105,7 +98,7 @@ class TCPServer:
                 await writer.wait_closed()
                 return
 
-            client_uid = data.get("client_uid", None)  # 解析 client_uid
+            client_uid = data.get("client_uid", None)  # 解析 client_uid，如果验证通过，则信任当前连接的 `client_uid`
             token = data.get("token", None)  # 解析 token
             if not client_uid or not token:  # 如果 client_uid 和 token 无效，则主动关闭连接
                 print("Missing client_uid or token in the message")
@@ -113,19 +106,25 @@ class TCPServer:
                 await writer.wait_closed()
                 return
 
+            # 查询数据库，验证 `node_uid` 和 `node_token` 是否正确
             stmt = select(NodeAuth).where(NodeAuth.node_uid == f"{client_uid}", NodeAuth.node_token == f"{token}")
             if not self.session.execute(stmt).fetchone():  # 验证 client_uid 和 token 是否正确
-                print("Incorrect client_uid or token")
+                print(f"Incorrect client_uid or token, node_uid: {client_uid}, node_token: {token}")
+                msg = do_msg_assembly(event="auth_failed", data={"client_uid": client_uid})
+                await self._do_send(writer, msg=msg)  # 回复认证成功消息
                 writer.close()
                 await writer.wait_closed()
                 return
 
             msg = do_msg_assembly(event="auth_success", data={"client_uid": client_uid})
             await self._do_send(writer, msg=msg)  # 回复认证成功消息
-            print(f"新客户端连接，client_uid: {client_uid}, token: {token}, addr: {addr}")
+            print(f"[TCP Server] 来自 {addr[0]}:{addr[1]} 的节点 {client_uid} 已通过验证")
 
         except Exception as e:
             print(f"Exception occurred while auth to {addr}: {e}")
+            writer.close()
+            await writer.wait_closed()
+            return
 
         """2、向注册中心标记客户端在线"""
         self.from_node_q.put({
@@ -169,6 +168,7 @@ class TCPServer:
             print(f"Client uid {client_uid} close connection. {e}")
 
         print(f"客户端 {client_uid} 断开了连接")
+        return
 
     async def _recv_coro(self, reader, client_uid, stop_event):
         try:
@@ -202,6 +202,15 @@ class TCPServer:
 
                 """布隆过滤器状态上报事件"""
                 if event == "bloom_filter_status":
+                    self.from_node_q.put({
+                        "node_uid": client_uid,
+                        "event": event,
+                        "data": data
+                    })
+                    continue
+
+                """布隆过滤器调节回执"""
+                if event == "adjust_bloom_filter_done":
                     self.from_node_q.put({
                         "node_uid": client_uid,
                         "event": event,
@@ -259,7 +268,7 @@ class TCPServer:
         msg_body = await reader.readexactly(msg_body_length)
         msg_body = msg_body.decode('utf-8')
 
-        print(f"[Received] {msg_body}")
+        # print(f"[Received] {msg_body}")
         return msg_body
 
     @staticmethod
@@ -278,4 +287,4 @@ class TCPServer:
         writer.write(msg_frame)
         await writer.drain()  # 确保数据已经被发送
 
-        print(f"[Sent] {msg.decode('utf-8')}")
+        # print(f"[Sent] {msg.decode('utf-8')}")

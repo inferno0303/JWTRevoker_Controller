@@ -1,4 +1,5 @@
 import configparser
+import math
 import threading
 from sqlalchemy import create_engine, select, insert, update, delete
 from sqlalchemy.orm import Session
@@ -9,7 +10,7 @@ import json
 
 
 class Pusher:
-    def __init__(self, config_path, event_q, from_node_q, to_node_q):
+    def __init__(self, config_path, event_q, from_node_q, to_node_q, to_optimization_q):
         # 读取配置文件
         config = configparser.ConfigParser()
         config.read(config_path, encoding='utf-8')
@@ -19,10 +20,6 @@ class Pusher:
 
         # 检查数据表，如果不存在则创建数据表
         engine = create_engine(f"sqlite:///{sqlite_path}")
-        NodeOnlineStatue.metadata.create_all(engine)
-        BloomFilterStatus.metadata.create_all(engine)
-        FailedPushMessages.metadata.create_all(engine)
-        JwtToken.metadata.create_all(engine)
 
         # 成员变量
         self.engine = engine
@@ -30,6 +27,7 @@ class Pusher:
         self.event_q = event_q
         self.from_node_q = from_node_q
         self.to_node_q = to_node_q
+        self.to_optimization_q = to_optimization_q
         self.local_cache = dict()
 
     def run_forever(self):
@@ -83,6 +81,10 @@ class Pusher:
                 self._node_offline(node_uid)
                 continue
 
+            if event == "adjust_bloom_filter_done":
+                self.to_optimization_q.put({**data, "event": event})
+                continue
+
     """线程：监听从 HTTP Server 发来的消息"""
 
     def listen_event_q(self):  # 监听 event_q 队列，从 HTTP Server 发来的消息
@@ -99,24 +101,51 @@ class Pusher:
 
     def cleanup(self):
         while True:
+            now = int(time.time())
             # 定时清理过期的 jwt
             stmt = delete(JwtToken).where(JwtToken.expire_time < int(time.time()))
             self.session.execute(stmt)
             self.session.commit()
-            time.sleep(3600)
+            # 定时清理下线的客户端
+            stmt = update(NodeOnlineStatue).where(NodeOnlineStatue.node_online_status == 1,
+                                                  NodeOnlineStatue.last_update < now - 60).values(
+                node_online_status=0, last_update=now)
+            self.session.execute(stmt)
+            self.session.commit()
+            time.sleep(60)
 
     """线程：定时重试推送消息"""
 
     def retry_push(self):
         while True:
             time.sleep(3600)
-            stmt = delete(FailedPushMessages).where(FailedPushMessages.post_status == 1)
+            stmt = delete(FailedPushMessages).where(FailedPushMessages.post_status == 0,
+                                                    FailedPushMessages.update_time < int(
+                                                        time.time()) - 10800)  # 删除过期的消息
             self.session.execute(stmt)
             self.session.commit()
             stmt = select(FailedPushMessages).where(FailedPushMessages.post_status == 0)
             for chunk in self.session.execute(stmt).yield_per(100):
                 for i in chunk:
-                    self._send_event(i.msg_from, i.from_uid, i.node_uid, i.event, i.data, retry_push=True)
+                    # 先查询缓存中的在线状态
+                    if i.node_uid in self.local_cache:
+                        if self.local_cache[i.node_uid]:
+                            # 节点在线，直接推送给 to_node_q
+                            self.to_node_q.put({
+                                "msg_from": i.msg_from,
+                                "from_uid": i.from_uid,
+                                "node_uid": i.node_uid,
+                                "event": i.event,
+                                "data": i.data
+                            })
+                            # 推送成功后直接删除数据库记录
+                            stmt = delete(FailedPushMessages).where(FailedPushMessages.uuid == f"{i.uuid}")
+                            self.session.execute(stmt)
+            stmt = delete(FailedPushMessages).where(
+                FailedPushMessages.update_time < int(time.time()) - 10800
+            )  # 删除过期的消息
+            self.session.execute(stmt)
+            self.session.commit()
 
     """1、节点上线事件回调函数"""
 
@@ -178,24 +207,25 @@ class Pusher:
         bloom_filter_filling_rate = data.get("bloom_filter_filling_rate", None)
         if not max_jwt_life_time or not rotation_interval or not bloom_filter_size or not hash_function_num or not bloom_filter_filling_rate:
             return
-        print(max_jwt_life_time, rotation_interval, bloom_filter_size, hash_function_num, bloom_filter_filling_rate)
 
-        now = int(time.time())
-        uuid_str = str(uuid.uuid4())
         stmt = insert(BloomFilterStatus).values(node_uid=node_uid, max_jwt_life_time=max_jwt_life_time,
                                                 rotation_interval=rotation_interval,
                                                 bloom_filter_size=bloom_filter_size,
                                                 hash_function_num=hash_function_num,
-                                                bloom_filter_filling_rate=str(bloom_filter_filling_rate),
-                                                last_update=now)
+                                                bloom_filter_filling_rate=bloom_filter_filling_rate,
+                                                last_update=int(time.time()))
         self.session.execute(stmt)
         self.session.commit()
+        print(
+            f"[Pusher][Received] {node_uid} 布隆过滤器状态：{max_jwt_life_time}, {rotation_interval}, {bloom_filter_size}, "
+            f"{hash_function_num}, {bloom_filter_filling_rate}, 内存使用 "
+            f"{math.ceil(int(max_jwt_life_time) / int(rotation_interval)) * int(bloom_filter_size) / 8388608:.2f} MBytes")
 
-    """向节点发送消息持久化"""
+    """5、向节点发送消息回调"""
 
-    def _send_event(self, msg_from: str, from_uid: str, node_uid: str, event: str, data: str,
-                    retry_push: bool = False) -> None:
-        if node_uid in self.local_cache:  # 先查询缓存
+    def _send_event(self, msg_from: str, from_uid: str, node_uid: str, event: str, data: dict) -> None:
+        # 先查询缓存中的在线状态
+        if node_uid in self.local_cache:
             if self.local_cache[node_uid]:
                 # 节点在线，直接推送给 to_node_q
                 self.to_node_q.put({
@@ -205,17 +235,27 @@ class Pusher:
                     "event": event,
                     "data": data
                 })
+                print(f"[Pusher][Send] {node_uid} 推送了消息：事件 {event}, 内容 {data}")
                 return  # 推送成功，直接返回
 
-        if not retry_push:
-            if event == "revoke_jwt":  # 如果没推送成功，存储到数据库，稍后推送
-                now = int(time.time())
-                uuid_str = str(uuid.uuid4())
-                if isinstance(data, dict):  # 如果传入的 event 是 dict，则需要转换为 str 再存到数据库
-                    data = json.dumps(data, separators=(',', ':'))
-                stmt = insert(FailedPushMessages).values(uuid=uuid_str, msg_from=msg_from, msg_to="node",
-                                                         from_uid=from_uid,
-                                                         to_uid=node_uid, event=event, data=data, post_status=0,
-                                                         update_time=now)
-                self.session.execute(stmt)
-                self.session.commit()
+        print(f"[Pusher][Send] {node_uid} 推送消息失败：事件 {event}, 内容 {data}")
+
+        if event == "revoke_jwt":  # 如果没推送成功，存储到数据库，稍后推送
+            now = int(time.time())
+            uuid_str = str(uuid.uuid4())
+            if isinstance(data, dict):  # 如果传入的 event 是 dict，则需要转换为 str 再存到数据库
+                data = json.dumps(data, separators=(',', ':'))
+            stmt = insert(FailedPushMessages).values(uuid=uuid_str, msg_from=msg_from, msg_to="node",
+                                                     from_uid=from_uid,
+                                                     to_uid=node_uid, event=event, data=data, post_status=0,
+                                                     update_time=now)
+            self.session.execute(stmt)
+            self.session.commit()
+
+        topic = {'adjust_bloom_filter', 'wait_for_slave_node', 'transfer_to_proxy_node'}
+        if event in topic:
+            self.to_optimization_q.put({
+                'error': 1,
+                'event': event,
+                'uuid': data.get('uuid')
+            })

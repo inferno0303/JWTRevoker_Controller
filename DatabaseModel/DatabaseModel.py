@@ -36,7 +36,7 @@ class NodeAuth(Base):
     id = mapped_column(Integer, primary_key=True, autoincrement=True, nullable=False)
     node_uid = mapped_column(String(255), nullable=False, unique=True)
     node_name = mapped_column(String(255), nullable=False, unique=True)
-    node_token = mapped_column(String(65535), nullable=False, unique=True)
+    node_token = mapped_column(String(65535), nullable=False)
 
     def __repr__(self):
         return f"<NodeAuth id: {self.id}, node_uid: {self.node_uid}, node_token:{self.node_token}>"
@@ -97,3 +97,41 @@ class FailedPushMessages(Base):
 
     def __repr__(self):
         return f"<failed_push_messages id: {self.id}, msg_from: {self.msg_from}, msg_to: {self.msg_to}>"
+
+
+class Prediction(Base):
+    """
+    LSTM预测结果
+    """
+    __tablename__ = "prediction"
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True, nullable=False)
+    uuid = mapped_column(String(255), nullable=False)
+    prediction_batch = mapped_column(String(255), nullable=False)
+
+
+class NodeAdjustmentActions(Base):
+    """
+    节点调整动作
+    """
+    __tablename__ = "node_adjustment_actions"
+
+    id = mapped_column(Integer, primary_key=True, autoincrement=True, nullable=False)
+    uuid = mapped_column(String(255), nullable=False)
+    decision_time = mapped_column(Integer, nullable=False)
+    # 调整主题
+    node_uid = mapped_column(String(255), nullable=False)
+    node_role = mapped_column(String(255), nullable=False)
+    event = mapped_column(String(255), nullable=False)
+    attached_to = mapped_column(String(255), nullable=False)
+    # 布隆过滤器参数
+    max_jwt_life_time = mapped_column(Integer, nullable=False)
+    rotation_interval = mapped_column(Integer, nullable=False)
+    bloom_filter_size = mapped_column(Integer, nullable=False)
+    hash_function_num = mapped_column(Integer, nullable=False)
+    # 状态机的状态
+    status = mapped_column(String(255), nullable=False)
+    update_time = mapped_column(Integer, nullable=False)
+
+    def __repr__(self):
+        return f"<node_adjustment_actions id: {self.id}, node_uid: {self.node_uid}, node_role: {self.node_role}, attached_to:{self.attached_to}, status:{self.status}, update_time:{self.update_time}>"

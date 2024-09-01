@@ -13,3 +13,6 @@ base_path = C:\MyProjects\Datasets\cluster-trace-microservices-v2022\data\MSRTMC
 
 [IWQoS23EdgeMeasurements]
 base_path = C:\MyProjects\Datasets\IWQoS OpenSource
+
+[sqlite]
+sqlite_path = C:\MyProjects\JWTRevoker_Controller\sqlite.db
