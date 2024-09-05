@@ -1,9 +1,9 @@
 import configparser
 import threading
 import time
-from sqlalchemy import create_engine, select, update, delete, desc, asc
+import ast
+from sqlalchemy import create_engine, select, update, delete, desc, asc, distinct
 from sqlalchemy.orm import Session
-
 from DatabaseModel.DatabaseModel import NodeOnlineStatue, NodeAdjustmentActions
 
 # 定义调整时间间隔为 10分钟（600秒）
@@ -27,82 +27,158 @@ class OptimizationEngine:
         self.to_optimization_q = to_optimization_q
 
     def run_forever(self):
-        # 接收状态完成线程
+        # 接收回执线程
         listen_to_optimization_q_t = threading.Thread(target=self.listen_to_optimization_q)
         listen_to_optimization_q_t.daemon = True
         listen_to_optimization_q_t.start()
 
         # 定时发送命令（状态机命令）线程
-        send_cmd_t = threading.Thread(target=self.send_cmd)
+        send_cmd_t = threading.Thread(target=self.send_adjust_bloom_filter)
         send_cmd_t.daemon = True
         send_cmd_t.start()
 
         send_cmd_t.join()
         listen_to_optimization_q_t.join()
 
+    """接收回执的线程"""
+
     def listen_to_optimization_q(self):
         while True:
-            message = self.to_optimization_q.get()
-            error = message.get("error", 0)
-            uuid = message.get("uuid", None)
-            event = message.get("event", None)
+            item = self.to_optimization_q.get()
+            event = item.get('event', None)
+            node_uid = item.get('node_uid', None)
+            uuid = item.get('uuid', None)
+            node_role = item.get('node_role', None)
 
-            if error:
-                if event == 'adjust_bloom_filter':
-                    stmt = update(NodeAdjustmentActions).where(NodeAdjustmentActions.uuid == f'{uuid}').values(
-                        status='await')
-                    self.session.execute(stmt)
-                    self.session.commit()
-            else:
-                if event == 'adjust_bloom_filter_done':
-                    stmt = select(NodeAdjustmentActions.node_role).where(NodeAdjustmentActions.uuid == f'{uuid}')
-                    [node_role] = self.session.execute(stmt).fetchone()
-                    if node_role == 'single_node':
-                        stmt = update(NodeAdjustmentActions).where(NodeAdjustmentActions.uuid == f'{uuid}').values(
-                            status='done')
-                        self.session.execute(stmt)
-                        self.session.commit()
+            if event == 'adjust_bloom_filter_done':
+                stmt = select(NodeAdjustmentActions).where(NodeAdjustmentActions.uuid == f'{uuid}')
+                result = self.session.execute(stmt).fetchone()
+                if result:
+                    [row] = result
+                    now = int(time.time())
+                    affected_node = list(ast.literal_eval(row.affected_node))  # 解析所有影响的节点
+                    completed_node = list(ast.literal_eval(row.completed_node))  # 解析已完成的节点
+
+                    # 处理 single_node 的回执
+                    if row.decision_type == 'single_node':
+                        completed_node.append(node_uid)
+                        # 如果已经完成所有的调整，则更新任务状态为 done（status=2）
+                        if completed_node == affected_node:
+                            stmt = update(NodeAdjustmentActions).where(NodeAdjustmentActions.uuid == f'{uuid}').values(
+                                completed_node=str(completed_node), status=2, update_time=now)
+                            self.session.execute(stmt)
+                            self.session.commit()
+                            continue
+                    # 处理 proxy_slave 的回执
+                    if row.decision_type == 'proxy_slave':
+                        # 处理 proxy_node 的回执，将状态更新到 proxy_node_done（status=2）
+                        if node_role == 'proxy_node':
+                            stmt = update(NodeAdjustmentActions).where(NodeAdjustmentActions.uuid == f'{uuid}').values(
+                                completed_node=str(completed_node), status=2, update_time=now)
+                            self.session.execute(stmt)
+                            self.session.commit()
+                            continue
+                        # 处理 slave_node 的回执
+                        if node_role == 'slave_node':
+                            completed_node.append(node_uid)
+                            # 如果已经完成所有的调整，则更新任务状态为 done（status=4）
+                            if completed_node == affected_node:
+                                stmt = update(NodeAdjustmentActions).where(
+                                    NodeAdjustmentActions.uuid == f'{uuid}').values(completed_node=str(completed_node),
+                                                                                    status=4, update_time=now)
+                                self.session.execute(stmt)
+                                self.session.commit()
+                                continue
 
     # 定时发送命令（状态机命令）线程
-    def send_cmd(self):
+    def send_adjust_bloom_filter(self):
         while True:
-            time.sleep(5)
+            time.sleep(1)
             now = int(time.time())
 
-            # 删除旧的消息
-            stmt = delete(NodeAdjustmentActions).where(
-                NodeAdjustmentActions.status != 'done',
-                NodeAdjustmentActions.decision_time < now - OPTIMIZATION_INTERVAL
-            )
-            self.session.execute(stmt)
-            self.session.commit()
+            # 查询等待中的命令
+            stmt = select(distinct(NodeAdjustmentActions.decision_batch)).order_by(
+                desc(NodeAdjustmentActions.decision_batch)).limit(1)  # 倒序查询最后一个decision_batch
+            result = self.session.execute(stmt).fetchone()
+            if result:
+                [decision_batch] = result
 
-            # 只推送消息给在线的节点
-            stmt = select(NodeOnlineStatue.node_uid).where(NodeOnlineStatue.node_online_status == 1)
-            for [node_uid] in self.session.execute(stmt).fetchall():
+                # 查询对应decision_batch
+                stmt = select(NodeAdjustmentActions).where(NodeAdjustmentActions.decision_batch == f"{decision_batch}")
+                result = self.session.execute(stmt).fetchall()
+                for [it] in result:
+                    affected_node = list(ast.literal_eval(it.affected_node))  # 解析所有影响的节点
 
-                # 推送 `node_role` == 'single_node' 的消息
-                # `node_role` == 'single_node' 的状态机：`await` -> `adjust_bloom_filter` -> `done`
-                stmt = select(NodeAdjustmentActions).where(
-                    NodeAdjustmentActions.node_uid == f'{node_uid}', NodeAdjustmentActions.node_role == 'single_node',
-                    NodeAdjustmentActions.status == 'await',
-                    NodeAdjustmentActions.decision_time > now - OPTIMIZATION_INTERVAL
-                ).order_by(desc(NodeAdjustmentActions.decision_time)).limit(1)
-                for [i] in self.session.execute(stmt).yield_per(100):
-                    # 更新状态
-                    stmt = update(NodeAdjustmentActions).where(NodeAdjustmentActions.uuid == f'{i.uuid}').values(
-                        status='adjust_bloom_filter')
-                    self.session.execute(stmt)
-                    self.session.commit()
-                    # 推送给节点
-                    self.event_q.put({
-                        "msg_from": "master",
-                        "from_uid": "master",
-                        "node_uid": i.node_uid,
-                        "event": i.event,
-                        "data": {
-                            "uuid": i.uuid, "node_role": i.node_role, "attached_to": i.attached_to,
-                            "max_jwt_life_time": i.max_jwt_life_time, "rotation_interval": i.rotation_interval,
-                            "bloom_filter_size": i.bloom_filter_size, "hash_function_num": i.hash_function_num
-                        }
-                    })
+                    # 处理处于 await 的任务
+                    if it.status == 0:
+
+                        # 处理 "single_node" 的任务
+                        if it.decision_type == 'single_node':
+                            for node_uid in affected_node:  # 给所有 node_uid 发送消息
+                                print(node_uid)
+                                self.event_q.put({
+                                    "msg_from": "master",
+                                    "from_uid": "master",
+                                    "node_uid": node_uid,
+                                    "event": "adjust_bloom_filter",
+                                    "data": {
+                                        "uuid": it.uuid, "node_role": "single_node",
+                                        "max_jwt_life_time": it.max_jwt_life_time,
+                                        "rotation_interval": it.rotation_interval,
+                                        "bloom_filter_size": it.bloom_filter_size,
+                                        "hash_function_num": it.hash_function_num
+                                    }
+                                })
+                            # 将状态更新为 waiting_for_single_node
+                            stmt = update(NodeAdjustmentActions).where(
+                                NodeAdjustmentActions.uuid == f'{it.uuid}').values(status=1, update_time=now)
+                            self.session.execute(stmt)
+                            self.session.commit()
+
+                        # 处理 "proxy_slave" 的任务
+                        if it.decision_type == 'proxy_slave':
+                            # 现在处于 await 状态：给 proxy_node 发送消息
+                            self.event_q.put({
+                                "msg_from": "master",
+                                "from_uid": "master",
+                                "node_uid": it.proxy_node,
+                                "event": "adjust_bloom_filter",
+                                "data": {
+                                    "uuid": it.uuid, "node_role": "proxy_node",
+                                    "max_jwt_life_time": it.max_jwt_life_time,
+                                    "rotation_interval": it.rotation_interval,
+                                    "bloom_filter_size": it.bloom_filter_size,
+                                    "hash_function_num": it.hash_function_num
+                                }
+                            })
+                            # 将状态更新为 waiting_for_proxy_node
+                            stmt = update(NodeAdjustmentActions).where(
+                                NodeAdjustmentActions.uuid == f'{it.uuid}').values(status=1, update_time=now)
+                            self.session.execute(stmt)
+                            self.session.commit()
+
+                    # 处理处于 proxy_node_done 的任务
+                    if it.status == 2 and it.decision_type == 'proxy_slave':
+                        # 查询 proxy_node 的 host 和 port
+                        stmt = select(NodeOnlineStatue).where(NodeOnlineStatue.node_uid == f'{it.proxy_node}',
+                                                              NodeOnlineStatue.node_online_status == 1)
+                        result = self.session.execute(stmt).fetchone()
+                        if result:
+                            [pn] = result
+                            # 给所有 slave_node 发送消息
+                            for slave_node in [i for i in affected_node if i != it.proxy_node]:
+                                self.event_q.put({
+                                    "msg_from": "master",
+                                    "from_uid": "master",
+                                    "node_uid": slave_node,
+                                    "event": "adjust_bloom_filter",
+                                    "data": {
+                                        "uuid": it.uuid, "node_role": "slave_node", "proxy_node": it.proxy_node,
+                                        "proxy_node_host": pn.node_ip, "proxy_node_port": pn.node_post
+                                    }
+                                })
+                            # 将状态更新为 waiting_for_slave_node
+                            stmt = update(NodeAdjustmentActions).where(NodeAdjustmentActions.uuid == f'{it.uuid}').values(
+                                status=3, update_time=now)
+                            self.session.execute(stmt)
+                            self.session.commit()

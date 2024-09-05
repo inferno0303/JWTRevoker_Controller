@@ -58,7 +58,7 @@ class TCPServer:
         except Exception as e:
             raise Exception(f"Server encountered an error: {e}")
 
-    def listen_queue_worker(self):  # 监听从 Pusher 发来的消息
+    def listen_queue_worker(self):  # 监听从 Pusher 发来的消息，然后通过channel发送给具体某个节点
         while True:
             if self.loop: break
             time.sleep(0.1)
@@ -75,7 +75,7 @@ class TCPServer:
             if node_uid:
                 if self.channel[node_uid]:
 
-                    """分类处理来自 master 消息"""
+                    """分类处理来自 Pusher 的消息"""
                     if event == "revoke_jwt":  # 如果是撤回消息，直接发送给节点
                         msg = do_msg_assembly(event, data)
                         asyncio.run_coroutine_threadsafe(self.channel[node_uid]["send_queue"].put(msg), self.loop)
@@ -191,7 +191,7 @@ class TCPServer:
                 msg = await self.channel[client_uid]["recv_queue"].get()
                 event, data = do_msg_parse(msg)  # 此时 data 为 dict 类型
 
-                """节点心跳事件"""
+                """接收到：节点心跳事件"""
                 if event == "keepalive":
                     self.from_node_q.put({
                         "node_uid": client_uid,
@@ -200,7 +200,7 @@ class TCPServer:
                     })
                     continue
 
-                """布隆过滤器状态上报事件"""
+                """接收到：布隆过滤器状态上报事件"""
                 if event == "bloom_filter_status":
                     self.from_node_q.put({
                         "node_uid": client_uid,
@@ -209,7 +209,7 @@ class TCPServer:
                     })
                     continue
 
-                """布隆过滤器调节回执"""
+                """接收到：布隆过滤器调节回执"""
                 if event == "adjust_bloom_filter_done":
                     self.from_node_q.put({
                         "node_uid": client_uid,
@@ -218,6 +218,7 @@ class TCPServer:
                     })
                     continue
 
+                """接收到：默认布隆过滤器参数"""
                 if event == "get_bloom_filter_default_config":
                     data = {
                         "client_uid": client_uid,

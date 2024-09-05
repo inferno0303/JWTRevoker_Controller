@@ -1,6 +1,6 @@
 import configparser
 from flask import Flask, jsonify, request
-from sqlalchemy import create_engine, select, insert, update, func
+from sqlalchemy import create_engine, select, insert, update, func, distinct, desc
 from sqlalchemy.orm import Session
 import uuid as uuid_lib
 import time
@@ -60,10 +60,10 @@ class HTTPServer:
         app.add_url_rule("/get_online_nodes", view_func=self.get_online_nodes, methods=['GET'])
         # 向节点发送调整消息（需要向节点发送消息）
         app.add_url_rule("/node_adjustment_actions", view_func=self.node_adjustment_actions, methods=['GET'])
+        # 批量撤回Token（压力测试）
+        app.add_url_rule("/batch_revoke_token", view_func=self.batch_revoke_token, methods=['GET'])
         # 向节点发送消息（需要向节点发送消息）
         app.add_url_rule("/send_msg_to_node", view_func=self.send_msg_to_node, methods=['GET'])
-        # 生成指定的Token（需要向节点发送消息）
-        app.add_url_rule("/get_new_token_by_args", view_func=self.get_new_token_by_args, methods=['GET'])
 
     def run_forever(self):
         app.run(host=self.ip, port=self.port)
@@ -331,14 +331,48 @@ class HTTPServer:
         向节点发送`节点调整动作`系列消息
         """
         try:
-            node_uid = str(request.args.get('node_uid'))  # 必须指定，必须是`node_auth`表的`node_uid`字段之一
-            node_role = str(request.args.get('node_role'))  # 必须指定，以下枚举值之一：`single_node`, `proxy_node`, `slave_node`
-            event = str(request.args.get('event'))  # 必须指定，以下枚举值之一：`adjust_bloom_filter`, `transfer_to_proxy_node`
-            attached_to = str(request.args.get('attached_to', ''))  # 如果`node_role`是`slave_node`，则必须指定一个除自身外的`node_uid`
+            now = int(time.time())
+            decision_time = int(request.args.get('decision_time', now))
+            decision_batch = int(request.args.get('decision_batch', now))
+            decision_type = str(request.args.get('decision_type', 'single_node'))
+            affected_node = str(request.args.get('affected_node', '[]'))
             max_jwt_life_time = int(request.args.get('max_jwt_life_time', 86400))
             rotation_interval = int(request.args.get('rotation_interval', 3600))
-            bloom_filter_size = int(request.args.get('bloom_filter_size', 4096))
+            bloom_filter_size = int(request.args.get('bloom_filter_size', 8388608))
             hash_function_num = int(request.args.get('hash_function_num', 5))
+            proxy_node = str(request.args.get('proxy_node', ''))
+        except ValueError:
+            return jsonify({"code": 400, "message": "Invalid args"}), 400
+
+        uuid = str(uuid_lib.uuid4())
+        now = int(time.time())
+        stmt = insert(NodeAdjustmentActions).values(
+            uuid=uuid, decision_time=decision_time, decision_batch=decision_batch, decision_type=decision_type,
+            affected_node=affected_node, max_jwt_life_time=max_jwt_life_time, rotation_interval=rotation_interval,
+            bloom_filter_size=bloom_filter_size, hash_function_num=hash_function_num, proxy_node=proxy_node,
+            completed_node='[]', status=0, update_time=now
+        )
+        self.session.execute(stmt)
+        self.session.commit()
+        return jsonify({"code": 200, "data": {
+            "uuid": uuid, "decision_time": decision_time, "decision_batch": decision_batch,
+            "decision_type": decision_type, "affected_node": affected_node, "max_jwt_life_time": max_jwt_life_time,
+            "rotation_interval": rotation_interval, "bloom_filter_size": bloom_filter_size,
+            "hash_function_num": hash_function_num, "proxy_node": proxy_node
+        }})
+
+    def batch_revoke_token(self):
+        """
+        按参数撤回Token（压力测试）
+        """
+        try:
+            now = int(time.time())
+            node_uid = str(request.args.get('node_uid'))  # 必须指定，必须是`node_auth`表的`node_uid`字段之一
+            total = int(request.args.get('total', 1))  # 生成多少个
+            create_time = int(request.args.get('create_time', now))
+            expire_time = int(request.args.get('expire_time', now + random.randint(0 * 3600, 24 * 3600)))
+            revoke_time = int(request.args.get('revoke_time', now))
+            user_id = str(request.args.get('user_id', "admin"))
         except ValueError:
             return jsonify({"code": 400, "message": "Invalid args"}), 400
 
@@ -347,57 +381,33 @@ class HTTPServer:
         count = self.session.execute(stmt).scalar()
         if not count: return jsonify({"code": 400, "message": f"Invalid args `node_uid`: {node_uid}"}), 400
 
-        # 校验 `node_role` 字段
-        if node_role not in {'single_node', 'proxy_node', 'slave_node'}:
-            return jsonify({"code": 400, "message": f"Invalid args `node_role`: {node_role}"}), 400
+        # 创建时间必须小于过期时间，否则报错
+        if create_time > expire_time:
+            return jsonify({"code": 400, "message": "The creation_time must be less than the expire_time"}), 400
 
-        # 校验 `event` 字段
-        if event not in {'adjust_bloom_filter', 'transfer_to_proxy_node'}:
-            return jsonify({"code": 400, "message": f"Invalid args `event`: {event}"}), 400
+        # 检查撤回时间是否正确
+        if revoke_time < create_time or revoke_time > expire_time:
+            return jsonify({"code": 400, "message": "The revoke_time must be between create_time and expire_time"}), 400
 
-        # 校验 `attached_to` 字段
-        if node_role == 'slave_node':
-            if attached_to == node_uid:
-                return jsonify({"code": 400, "message": f"Invalid args `attached_to`: {attached_to}"}), 400
-            stmt = select(func.count(NodeAuth.id)).where(NodeAuth.node_uid == attached_to)
-            count = self.session.execute(stmt).scalar()
-            if not count:
-                return jsonify({"code": 400, "message": f"Invalid args `attached_to`: {attached_to}"}), 400
-
-        # 校验 `max_jwt_life_time` 和 `rotation_interval` 字段
-        if max_jwt_life_time <= 0 or rotation_interval <= 0 or max_jwt_life_time <= rotation_interval:
-            return jsonify({"code": 400,
-                            "message": f"Invalid args `max_jwt_life_time`: {max_jwt_life_time}, `rotation_interval`: {rotation_interval}"}), 400
-
-        # 校验 `bloom_filter_size` 字段
-        # 必须是2的幂次方 [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072,
-        # 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456,
-        # 536870912, 1073741824, 2147483648, 4294967296, 8589934592]
-        if bloom_filter_size <= 0 or (bloom_filter_size & (bloom_filter_size - 1)) != 0:
-            return jsonify({"code": 400,
-                            "message": f"Invalid args `bloom_filter_size`: {bloom_filter_size} is not power of 2"}), 400
-
-        # 校验 `hash_function_num` 字段
-        if hash_function_num <= 0:
-            return jsonify({"code": 400, "message": f"Invalid args `hash_function_num`: {hash_function_num}"}), 400
-
-        # 存储到 `node_adjustment_actions` 表
-        uuid = str(uuid_lib.uuid4())
-        now = int(time.time())
-        stmt = insert(NodeAdjustmentActions).values(
-            uuid=uuid, decision_time=now, node_uid=node_uid, node_role=node_role,
-            event=event, attached_to=attached_to, max_jwt_life_time=max_jwt_life_time,
-            rotation_interval=rotation_interval, bloom_filter_size=bloom_filter_size,
-            hash_function_num=hash_function_num, status='await', update_time=now
-        )
-        self.session.execute(stmt)
+        for i in range(total):
+            uuid = str(uuid_lib.uuid4())
+            jwt_token = uuid
+            stmt = insert(JwtToken).values(uuid=uuid, jwt_token=jwt_token, create_time=create_time,
+                                           expire_time=expire_time, revoke_flag=1, revoke_time=revoke_time,
+                                           node_uid=node_uid, user_id=user_id)
+            rowcount = self.session.execute(stmt).rowcount
+            # 给节点发送撤回消息
+            if expire_time > int(time.time()):
+                data = {"token": uuid, "exp_time": expire_time}
+                self.event_q.put({
+                    "msg_from": "master",
+                    "from_uid": "master",
+                    "node_uid": node_uid,
+                    "event": "revoke_jwt",
+                    "data": data
+                })
         self.session.commit()
-        return jsonify({"code": 200, "data": {"node_uid": node_uid, "msg": {"event": event, "data": {
-            "uuid": uuid, "node_uid": node_uid, "node_role": node_role, "attached_to": attached_to,
-            "max_jwt_life_time": max_jwt_life_time, "rotation_interval": rotation_interval,
-            "bloom_filter_size": bloom_filter_size, "hash_function_num": hash_function_num,
-            "status": "await", "update_time": now
-        }}}})
+        return jsonify({"code": 200, "data": {"total": total}})
 
     def send_msg_to_node(self):
         """
@@ -418,74 +428,3 @@ class HTTPServer:
             "data": json.loads(data)  # 将`str`类型的`data`转换为`dict`
         })
         return jsonify({"code": 200, "data": {"node_uid": node_uid, "msg": {"event": event, "data": data}}})
-
-    def get_new_token_by_args(self):
-        """
-        按参数生成新的Token
-        """
-        try:
-            node_uid = str(request.args.get('node_uid'))  # 必须指定，必须是`node_auth`表的`node_uid`字段之一
-            create_time = int(request.args.get('create_time', int(time.time())))
-            expire_time = int(request.args.get('expire_time', create_time + random.randint(6 * 3600, 24 * 3600)))
-            revoke_flag = int(request.args.get('revoke_flag', 0))
-            revoke_time = int(request.args.get('revoke_time', 0))
-            user_id = str(request.args.get('user_id', "admin"))
-            count = int(request.args.get('count', 1))  # 用于指定生成的次数
-            revocation_probability = float(request.args.get('revocation_probability', 1.0))  # 用于指定有多少概率是被撤回的
-        except ValueError:
-            return jsonify({"code": 400, "message": "Invalid args"}), 400
-
-        # 校验 `node_uid` 字段
-        stmt = select(func.count(NodeAuth.id)).where(NodeAuth.node_uid == node_uid)
-        count = self.session.execute(stmt).scalar()
-        if not count: return jsonify({"code": 400, "message": f"Invalid args `node_uid`: {node_uid}"}), 400
-
-        # 创建时间必须小于过期时间，否则报错
-        if create_time > expire_time:
-            return jsonify({"code": 400, "message": "The creation_time must be less than the expire_time"}), 400
-
-        if revoke_flag == 0:
-            revoke_time = None
-
-        # 如果这个Token已经被撤回，则检查撤回时间是否正确
-        if revoke_flag == 1 and revoke_time and (revoke_time < create_time or revoke_time > expire_time):
-            return jsonify({"code": 400, "message": "The revoke_time must be between create_time and expire_time"}), 400
-
-        elif revoke_flag == 1 and not revoke_time:
-            revoke_time = int(time.time())
-
-        uuid = str(uuid_lib.uuid4())
-        jwt_token = uuid
-        stmt = insert(JwtToken).values(uuid=uuid, jwt_token=jwt_token, create_time=create_time,
-                                       expire_time=expire_time, revoke_flag=revoke_flag, revoke_time=revoke_time,
-                                       node_uid=node_uid, user_id=user_id)
-        rowcount = self.session.execute(stmt).rowcount
-        self.session.commit()
-
-        # 给节点发送撤回消息
-        if expire_time > int(time.time()):
-            data = {"token": uuid, "exp_time": expire_time}
-            self.event_q.put({
-                "msg_from": "master",
-                "from_uid": "master",
-                "node_uid": node_uid,
-                "event": "revoke_jwt",
-                "data": data
-            })
-
-        data = {
-            "rowcount": rowcount,
-            "rows": [
-                {
-                    "uuid": uuid,
-                    "jwt_token": jwt_token,
-                    "create_time": create_time,
-                    "expire_time": expire_time,
-                    "revoke_flag": revoke_flag,
-                    "revoke_time": revoke_time,
-                    "node_uid": node_uid,
-                    "user_id": user_id
-                }
-            ]
-        }
-        return jsonify({"code": 200, "data": data})

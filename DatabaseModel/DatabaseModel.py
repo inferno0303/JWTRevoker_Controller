@@ -118,20 +118,22 @@ class NodeAdjustmentActions(Base):
 
     id = mapped_column(Integer, primary_key=True, autoincrement=True, nullable=False)
     uuid = mapped_column(String(255), nullable=False)
-    decision_time = mapped_column(Integer, nullable=False)
-    # 调整主题
-    node_uid = mapped_column(String(255), nullable=False)
-    node_role = mapped_column(String(255), nullable=False)
-    event = mapped_column(String(255), nullable=False)
-    attached_to = mapped_column(String(255), nullable=False)
+    decision_time = mapped_column(Integer, nullable=False)  # 决策时间
+    decision_batch = mapped_column(Integer, nullable=False)  # 决策批次
+    decision_type = mapped_column(String(255), nullable=False)  # 决策类型
+    affected_node = mapped_column(String(65535), nullable=False)  # 影响节点，是一个`["node_uid"]`类型
     # 布隆过滤器参数
     max_jwt_life_time = mapped_column(Integer, nullable=False)
     rotation_interval = mapped_column(Integer, nullable=False)
     bloom_filter_size = mapped_column(Integer, nullable=False)
     hash_function_num = mapped_column(Integer, nullable=False)
-    # 状态机的状态
-    status = mapped_column(String(255), nullable=False)
+    # 当`decision_type`是 "proxy_slave" 时，`proxy_node`的值为代理节点的`node_uid`；当`decision_type`是 "single_node" 时，该值为空
+    proxy_node = mapped_column(String(255), nullable=True)
+    completed_node = mapped_column(String(65535), nullable=False)  # 已完成的节点，是一个`["node_uid"]`类型
+    status = mapped_column(Integer, nullable=False)  # 存储状态机的状态，枚举值，0代表"await"，1代表"adjust_bloom_filter"，2代表"done"
     update_time = mapped_column(Integer, nullable=False)
 
     def __repr__(self):
-        return f"<node_adjustment_actions id: {self.id}, node_uid: {self.node_uid}, node_role: {self.node_role}, attached_to:{self.attached_to}, status:{self.status}, update_time:{self.update_time}>"
+        return (f"<node_adjustment_actions id: {self.id}, uuid: {self.uuid}, decision_time: {self.decision_time}, "
+                f"decision_batch:{self.decision_batch}, decision_type:{self.decision_type}, status:{self.status}, "
+                f"update_time:{self.update_time}>")

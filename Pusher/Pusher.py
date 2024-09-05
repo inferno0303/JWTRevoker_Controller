@@ -89,12 +89,12 @@ class Pusher:
 
     def listen_event_q(self):  # 监听 event_q 队列，从 HTTP Server 发来的消息
         while True:
-            message = self.event_q.get()
-            msg_from = message.get("msg_from", None)
-            from_uid = message.get("from_uid", None)
-            node_uid = message.get("node_uid", None)
-            event = message.get("event", None)
-            data = message.get("data", None)
+            item = self.event_q.get()
+            msg_from = item.get("msg_from", None)
+            from_uid = item.get("from_uid", None)
+            node_uid = item.get("node_uid", None)
+            event = item.get("event", None)
+            data = item.get("data", None)
             self._send_event(msg_from, from_uid, node_uid, event, data)
 
     """线程：定时清理数据库"""
@@ -240,7 +240,8 @@ class Pusher:
 
         print(f"[Pusher][Send] {node_uid} 推送消息失败：事件 {event}, 内容 {data}")
 
-        if event == "revoke_jwt":  # 如果没推送成功，存储到数据库，稍后推送
+        """如果节点不在线，则稍后推送"""
+        if event == "revoke_jwt":
             now = int(time.time())
             uuid_str = str(uuid.uuid4())
             if isinstance(data, dict):  # 如果传入的 event 是 dict，则需要转换为 str 再存到数据库
@@ -251,11 +252,3 @@ class Pusher:
                                                      update_time=now)
             self.session.execute(stmt)
             self.session.commit()
-
-        topic = {'adjust_bloom_filter', 'wait_for_slave_node', 'transfer_to_proxy_node'}
-        if event in topic:
-            self.to_optimization_q.put({
-                'error': 1,
-                'event': event,
-                'uuid': data.get('uuid')
-            })
