@@ -9,7 +9,7 @@ from ScriptsForDatasets.TableMappers import ClusterTraceMicroservicesV2022Msrtmc
     ClusterTraceMicroservicesV2022NodeMetrics
 
 config = configparser.ConfigParser()
-config.read('../config.txt')
+config.read('../config.txt', encoding='utf-8')
 
 # 数据库
 MYSQL_HOST = config.get('mysql', 'host')

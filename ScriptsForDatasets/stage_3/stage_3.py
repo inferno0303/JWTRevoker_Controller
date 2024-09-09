@@ -1,5 +1,3 @@
-import argparse  # 用于解析命令行参数
-import os  # 用于寻找配置文件路径
 import configparser
 from sqlalchemy import create_engine, select, func, insert, distinct, text
 from sqlalchemy.orm import session, Session
@@ -7,7 +5,7 @@ from ScriptsForDatasets.TableMappers import NodeTable
 from DatabaseModel.DatabaseModel import NodeAuth
 
 config = configparser.ConfigParser()
-config.read('../config.txt')
+config.read('../config.txt', encoding='utf-8')
 
 # MYSQL 数据库
 MYSQL_HOST = config.get('mysql', 'host')

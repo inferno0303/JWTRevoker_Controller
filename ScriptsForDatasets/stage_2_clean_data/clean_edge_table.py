@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from ScriptsForDatasets.TableMappers import IWQoS23EdgeMeasurements, EdgeTable
 
 config = configparser.ConfigParser()
-config.read('../config.txt')
+config.read('../config.txt', encoding='utf-8')
 
 # 数据库
 MYSQL_HOST = config.get('mysql', 'host')
