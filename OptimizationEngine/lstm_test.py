@@ -101,7 +101,7 @@ def main():
     seq_length = 10
 
     for original_data, nodeid, count, total in dataset_iterator:
-        model = LSTM(input_size=1, hidden_layer_size=64, output_size=1)
+        model = LSTM(input_size=1, hidden_layer_size=50, output_size=1)
         loss_function = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
