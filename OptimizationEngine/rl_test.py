@@ -10,7 +10,7 @@ class Graph:
     def __init__(self, node_features, edge_weights):
         self.node_features = node_features  # 这是一个张量，每个元素表示图中一个节点的特征
         self.edge_weights = edge_weights  # 这是一个二维张量，其中元素表示节点之间的边权值
-        self.num_nodes = len(node_features)
+        self.num_nodes = len(node_features)  # 节点数量
         self.communities = [-1] * self.num_nodes  # 初始化为 -1 的列表，用于跟踪每个节点所属的社区。-1 表示节点未被分配到任何社区。
 
     # 这个方法将指定节点分配到一个社区
@@ -55,7 +55,8 @@ def main():
     num_communities = 3
     max_attr_sum = 10
     max_edge_weight = 5
-    num_episodes = 1000
+    num_episodes = 10000
+    # 指定随机种子，保证每次运行的结果一致
     torch.manual_seed(42)
     np.random.seed(42)
 
@@ -80,12 +81,13 @@ def main():
         rewards = []
 
         for node in range(graph.num_nodes):
-            # state: 当前节点的特征。
-            # probs: 通过 policy_net 预测该节点属于各个社区的概率。
-            # community: 根据概率分布随机选择一个社区。
-            # log_prob: 记录选择该社区的对数概率，用于后续的策略梯度更新。
-            # reward: 如果该社区满足约束条件，给予正奖励（1），否则给予负奖励（-1）。
-            # log_probs 和 rewards: 分别记录对数概率和奖励，用于后续的策略优化。
+            # state: 当前节点的特征
+            # probs: 通过 policy_net 预测该节点属于各个社区的概率
+            # community: 根据概率分布随机选择一个社区
+            # log_prob: 记录选择该社区的对数概率，用于后续的策略梯度更新
+            # reward: 如果该社区满足约束条件，给予正奖励（1），否则给予负奖励（-1）
+            # log_probs：存储了每个节点被分配到某个社区时对应的对数概率
+            # rewards：存储了每个节点在当前社区分配中的奖励值
             state = graph.node_features[node].float().unsqueeze(0)  # 将张量转换为浮点型
             probs = policy_net(state)
             community = torch.multinomial(probs, 1).item()
@@ -101,12 +103,12 @@ def main():
             rewards.append(reward)
 
         # 计算损失并更新网络
-        loss = 0
+        loss = 0  # 每一轮训练（episode）开始时，损失 loss 被初始化为 0，以便后续计算累加各节点的损失
         for log_prob, reward in zip(log_probs, rewards):
             loss -= log_prob * reward
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        optimizer.zero_grad()  # 它将模型的所有梯度清零，防止前一次的梯度累积到当前的梯度上
+        loss.backward()  # 反向传播的过程，通过 PyTorch 自动计算损失 loss 相对于神经网络参数的梯度
+        optimizer.step()  # 根据前面计算的梯度来调整网络参数，使得网络逐渐朝着能够更好地预测节点分配的方向发展
         rewards_over_time.append(sum(rewards) / len(rewards))
 
         # 每隔一定的轮次输出一次结果

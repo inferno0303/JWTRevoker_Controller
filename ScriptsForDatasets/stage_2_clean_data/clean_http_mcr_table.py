@@ -27,7 +27,7 @@ def process_data(q):
 
         # 将`原始时间戳`映射到`时间序列`
         time_mapper = {}  # 结构类似于 {`timestamp`: `time_seq`, ...}
-        step = 5
+        step = 5  # 每5秒归一次
         stmt = select(distinct(ClusterTraceMicroservicesV2022Msrtmcr.timestamp)).order_by(
             ClusterTraceMicroservicesV2022Msrtmcr.timestamp)
         for chunk in session.execute(stmt).yield_per(1000):

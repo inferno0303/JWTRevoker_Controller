@@ -1,25 +1,25 @@
 import math
 
 
-def calculate_probability(k, n, m):
+def calculate_probability(k, n, m) -> float:
     p = (1 - math.exp(-k * n / m)) ** k
     return p
 
 
-def optimal_k(m, n):
+def optimal_k(m, n) -> float:
     if n == 0:
         return 0  # 防止除以零
     return (m / n) * math.log(2)
 
 
-def calculate_m(n, p):
+def calculate_m(n, p) -> float:
     if p == 0 or p >= 1:
         raise ValueError("p must be between 0 and 1 (exclusive)")
     m = - (n * math.log(p)) / (math.log(2) ** 2)
-    return math.ceil(m)  # 向上取整，因为 m 必须是整数
+    return m
 
 
-def upscale_m(m):
+def upscale_m(m) -> int:
     if m <= 0 or m > 8589934592:
         raise ValueError("m must be > 0 and <= 8589934592")
     m_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144,
