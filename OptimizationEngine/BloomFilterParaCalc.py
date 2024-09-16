@@ -30,6 +30,16 @@ def upscale_m(m) -> int:
             return i
 
 
+def calculate_m_prime(n: int, p: float) -> int:
+    if n <= 0:
+        raise ValueError("参数 n 必须是正整数。")
+    if not (0 < p < 1):
+        raise ValueError("参数 p 必须在 0 到 1 之间（不包含 0 和 1）。")
+    # m = 2 ** math.ceil(math.log2(-n * math.log(p) / (math.log(2) ** 2)))
+    m = 2 ** math.ceil(math.log2(-n * math.log(p)) + 1.057534)
+    return m
+
+
 def searching(n, p_target):
     if p_target == 0 or p_target >= 1:
         raise ValueError("p must be between 0 and 1 (exclusive)")
@@ -70,6 +80,13 @@ def main():
     print()
     m_s, k_s, p_s = searching(n, p_target)
     print(f"暴力搜索结果：m={m_s}, k={k_s}, p={p_s}")
+
+    print()
+    m_prime = calculate_m_prime(n, p_target)
+    k_optimal = round(optimal_k(m_prime, n))
+    p_acc = calculate_probability(k_optimal, n, m_prime)
+    print(f'm_prime={m_prime}, k_optimal={k_optimal}, p={p_acc:.9f}')
+
 
 if __name__ == '__main__':
     main()

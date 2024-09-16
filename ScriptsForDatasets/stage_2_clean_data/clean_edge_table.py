@@ -1,6 +1,7 @@
 import multiprocessing
 import os
 import configparser
+import math
 import time
 from sqlalchemy import create_engine, text, select, func, distinct
 from sqlalchemy.orm import Session
@@ -22,7 +23,7 @@ def process_data(q):
     engine = create_engine(f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{TARGET_DATABASE}")
     with Session(engine) as session:
         stmt = select(func.min(IWQoS23EdgeMeasurements.detect_time).label('MIN_TIME'))
-        [min_time] = session.execute(stmt).fetchone()
+        min_time = session.execute(stmt).scalars().first()
 
         # 将`原始时间戳`映射到`时间序列`
         time_mapper = {}  # 结构类似于 {`timestamp`: `time_seq`, ...}
@@ -30,8 +31,8 @@ def process_data(q):
         stmt = select(distinct(IWQoS23EdgeMeasurements.detect_time)).order_by(IWQoS23EdgeMeasurements.detect_time)
         for chunk in session.execute(stmt).yield_per(1000):
             for ts in chunk:
-                offset = int((ts - min_time) / 1000)  # 计算`原始时间戳`距离数据集开始时间过去了多少秒
-                mapped_value = ((offset + step - 1) // step) * step  # offset + step - 1: 这是为了将偏移值向上舍入到下一个 step 的倍数
+                offset = int((ts - min_time) / 1000)
+                mapped_value = math.ceil(offset / step) * step  # 计算向上取整的 step 倍数
                 time_mapper[ts] = mapped_value  # 添加到映射表中
 
         # 将`原始src_machine_id`和`dst_machine_id`映射到`新nodeid`
