@@ -58,31 +58,59 @@ def process_data(q):
 
 
 def insert_db(q, table_mapper):
+    """
+    使用多进程，主进程负责插值并将数据放入队列，进程（insert_db）负责从队列中读取插待写入的数据，并以批量方式写入数据库。
+    """
     engine = create_engine(f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{TARGET_DATABASE}")
-    with Session(engine) as session:
-        batch = []
-        count = 0
-        while True:
-            item = q.get()
-            if item is not None:  # 检查是否是结束标记
-                batch.append(item)
-                if len(batch) >= 10000:
-                    count += len(batch)
-                    session.bulk_insert_mappings(table_mapper, batch)
-                    session.commit()
-                    batch.clear()
-                    print(f"[PID {os.getpid()}] 累计写入 {count} 条记录到数据库")
-                continue
+    table_name = table_mapper.__tablename__
 
+    with Session(engine) as session:
+        try:
+            # 禁用表索引
+            session.execute(text(f"ALTER TABLE {table_name} DISABLE KEYS"))
+            print(f"[PID {os.getpid()}] 禁用了表 {table_name} 的索引")
+
+            batch = []
+            count = 0
+
+            while True:
+                try:
+                    # 从队列中获取数据
+                    item = q.get()
+                    if item is None:  # 显式退出标记
+                        print(f"[PID {os.getpid()}] 收到结束标记")
+                        break
+
+                    # 将数据加入批次
+                    batch.append(item)
+
+                    # 批量插入，达到10000条时写入数据库
+                    if len(batch) >= 10000:
+                        count += len(batch)
+                        session.bulk_insert_mappings(table_mapper, batch)
+                        session.commit()
+                        print(f"[PID {os.getpid()}] 累计写入 {count} 条记录到数据库")
+                        batch.clear()  # 清空批次
+                except Exception as e:
+                    print(f"[PID {os.getpid()}] 数据库插入操作失败: {e}")
+                    session.rollback()  # 遇到错误时回滚事务
+                    continue
+
+            # 插入剩余的数据
             if batch:
                 count += len(batch)
                 session.bulk_insert_mappings(table_mapper, batch)
                 session.commit()
-                batch.clear()
-                print(f"[PID {os.getpid()}] 累计写入 {count} 条记录到数据库")
-            break
+                print(f"[PID {os.getpid()}] 最后插入 {len(batch)} 条记录")
 
-        print(f"[PID {os.getpid()}] 写入数据库完成，累计写入 {count} 条记录")
+        except Exception as e:
+            print(f"[PID {os.getpid()}] 启动数据库写入操作失败: {e}")
+
+        finally:
+            # 启用表索引
+            session.execute(text(f"ALTER TABLE {table_name} ENABLE KEYS"))
+            print(f"[PID {os.getpid()}] 启用了表 {table_name} 的索引")
+            print(f"[PID {os.getpid()}] 写入数据库完成，累计写入 {count} 条记录")
 
 
 def main():

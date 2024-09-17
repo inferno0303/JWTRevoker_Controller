@@ -223,6 +223,7 @@ def main():
         original_table_name = IWQoS23EdgeMeasurements.__tablename__
         tmp_table_name = f"{IWQoS23EdgeMeasurements.__tablename__}_tmp"
 
+        print(f'将字段 `detect_time`以及`src_machine_id` 排序')
         print(f"创建临时表 {tmp_table_name}")
         sql = f"""CREATE TABLE {tmp_table_name} AS
                 SELECT * FROM {original_table_name}
@@ -244,8 +245,8 @@ def main():
     创建数据库索引
     """
     print(f"创建数据库索引")
-    Index('src_machine_id_idx', IWQoS23EdgeMeasurements.src_machine_id).create(engine)
-    Index('detect_time_idx', IWQoS23EdgeMeasurements.detect_time).create(engine)
+    Index('src_machine_id_dst_machine_id_detect_time_index', IWQoS23EdgeMeasurements.src_machine_id,
+          IWQoS23EdgeMeasurements.dst_machine_id, IWQoS23EdgeMeasurements.detect_time).create(engine)
 
     print(f"执行用时 {int(time.time() - start_time)} 秒")
 

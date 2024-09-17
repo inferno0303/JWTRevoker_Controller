@@ -10,7 +10,6 @@ from sklearn.preprocessing import MinMaxScaler
 from sqlalchemy import create_engine, text, select, func, distinct, and_, Row, RowMapping
 from sqlalchemy.orm import Session
 from ScriptsForDatasets.TableMappers import EdgeTable, NodeTable
-import random
 
 config = configparser.ConfigParser()
 config.read('../config.txt', encoding='utf-8')
@@ -22,8 +21,8 @@ MYSQL_USER = config.get('mysql', 'user')
 MYSQL_PASSWORD = config.get('mysql', 'password')
 TARGET_DATABASE = config.get('mysql', 'database')
 
-P_FALSE_TARGET = 0.0001
-MAX_REVOKE_COUNT = 100000000  # 每分钟最大撤回数
+P_FALSE_TARGET = 0.00001
+MAX_REVOKE_COUNT = 100000  # 每分钟最大撤回数
 OP_INTERVAL = 1800  # 30 分钟一次时间间隙
 MAX_MEMORY_LIMIT = 1 * 1024 * 1024 * 1024 * 8
 MAX_RTT = 64  # ms
