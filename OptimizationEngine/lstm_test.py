@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
-import csv
 from scipy.interpolate import interp1d
 from sqlalchemy import create_engine, select, update, delete, desc, asc, distinct
 from sqlalchemy.orm import Session

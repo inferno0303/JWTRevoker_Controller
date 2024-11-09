@@ -29,8 +29,7 @@ def setup_database():
 
 
 def create_index(engine):
-    # 创建数据库索引
-    print("创建数据库索引")
+    print("创建索引 node_table_nodeid_time_sequence_index")
     Index('node_table_nodeid_time_sequence_index', NodeTable.nodeid, NodeTable.time_sequence).create(engine)
 
 

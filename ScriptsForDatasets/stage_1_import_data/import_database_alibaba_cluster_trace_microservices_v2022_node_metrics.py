@@ -13,10 +13,12 @@ from collections import Counter
 from sqlalchemy import create_engine, text, Index
 from sqlalchemy.orm import Session
 
-from ScriptsForDatasets.TableMappers import ClusterTraceMicroservicesV2022NodeMetrics
+from database_models.datasets_models import ClusterTraceMicroservicesV2022NodeMetrics
 
 config = configparser.ConfigParser()
 config.read('../config.txt', encoding='utf-8')
+
+DATASETS_DB = config.get('DATABASE', 'datasets_db')
 
 # 数据库
 MYSQL_HOST = config.get('mysql', 'host')

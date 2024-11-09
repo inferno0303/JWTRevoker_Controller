@@ -39,14 +39,8 @@ class GCN(torch.nn.Module):
         # 第一层图卷积，将输入特征映射到隐藏层1
         self.conv1 = torch_geometric.nn.GCNConv(in_channels, hidden_channels)
 
-        # # 第二层图卷积，进一步将隐藏层1的输出映射到隐藏层2
-        # self.conv2 = torch_geometric.nn.GCNConv(hidden_channels, hidden_channels)
-        #
-        # # 第三层图卷积，进一步将隐藏层2的输出映射到隐藏层3
-        # self.conv3 = torch_geometric.nn.GCNConv(hidden_channels, hidden_channels)
-
-        # 第四层图卷积，将隐藏层3的输出映射到输出层（任务的目标维度）
-        self.conv4 = torch_geometric.nn.GCNConv(hidden_channels, out_channels)
+        # 第二层图卷积，进一步将隐藏层1的输出映射到隐藏层2
+        self.conv2 = torch_geometric.nn.GCNConv(hidden_channels, out_channels)
 
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
@@ -55,18 +49,11 @@ class GCN(torch.nn.Module):
         x = self.conv1(x, edge_index)
         x = torch.nn.functional.relu(x)
 
-        # # 第二层卷积 + ReLU
-        # x = self.conv2(x, edge_index)
-        # x = torch.nn.functional.relu(x)
-        #
-        # # 第三层卷积 + ReLU
-        # x = self.conv3(x, edge_index)
-        # x = torch.nn.functional.relu(x)
+        # 加入 dropout
+        x = torch.nn.functional.dropout(x, p=self.dropout, training=self.training)
 
-        x = torch.nn.functional.dropout(x, p=self.dropout, training=self.training)  # 加入 dropout
-
-        # 第四层卷积，不需要ReLU，因为这是最后一层
-        x = self.conv4(x, edge_index)
+        # 第二层卷积，不需要ReLU，因为这是最后一层
+        x = self.conv2(x, edge_index)
 
         # 返回最终的输出
         return x
@@ -293,76 +280,76 @@ def main():
         print(f'当前推演时间：第{ts}秒')
         delay_matrix, revoke_num = get_graph_data(node_list, ts)
 
-        # 启发式算法
-        community_list = {node: [node] for node in node_list}
-        p = 0.001
-
-        # 对 revoke_num 进行从大到小排序
-        sorted_revoke_num = sorted(revoke_num.items(), key=lambda x: x[1], reverse=True)
-
-        # 初始化每个节点的可共享内存
-        remaining_m = {node: 0 for node in node_list}
-
-        # 计算每个节点的初始内存
-        for node, num in sorted_revoke_num:
-            m_prime = 2 ** math.ceil(math.log2(-num * math.log(p)) + 1.057534)
-            m = - (num * math.log(p)) / (math.log(2) ** 2)
-            remaining_m[node] = m_prime - m  # 每个节点可共享的内存
-
-        # 对 remaining_m 进行从小到大的排序
-        remaining_m = sorted(remaining_m.items(), key=lambda x: x[1], reverse=False)
-
-        # 依次取出 sorted_revoke_num 中的最大项
-        saved_memory = 0
-        while sorted_revoke_num:
-            follower_node, msg_num = sorted_revoke_num.pop(0)  # 每次取出第一个元素（最大的）
-
-            # 遍历 sorted_remaining_m（从小到大排序）
-            for leader_node, remaining_memory in remaining_m:
-                if follower_node == leader_node:
-                    continue
-
-                # 判断延迟约束
-                if (delay_matrix[leader_node][follower_node] > MAX_RTT or
-                        delay_matrix[follower_node][leader_node] > MAX_RTT):
-                    continue
-
-                # 计算 follower_node 需要的内存
-                m = - (msg_num * math.log(p)) / (math.log(2) ** 2)
-
-                # 判断容量约束
-                if m > remaining_memory:
-                    continue
-
-                # 扣减 leader_node 的剩余内存
-                remaining_m_dict = dict(remaining_m)  # 将列表转换为字典进行更新
-                remaining_m_dict[leader_node] = remaining_memory - m
-                saved_memory += m
-
-                del remaining_m_dict[follower_node]  # 删除 follower_node 的背包
-
-                # 重新排序 remaining_m，转换回列表
-                remaining_m = sorted(remaining_m_dict.items(), key=lambda x: x[1], reverse=False)
-
-                # 更新 community_list
-                community_list[leader_node].append(follower_node)
-                community_list[follower_node].clear()  # 删除 follower_node 的背包
-                del community_list[follower_node]
-                break
-
-        # 打印结果
-        count = 0
-        for leader_node, nodes in community_list.items():  # 使用 .items() 遍历字典
-            if nodes:
-                count += 1
-                if len(nodes) == 1:
-                    print(f'社区{count:03}的是孤立节点组成的社区:{leader_node}')
-                else:
-                    print(f'社区{count:03}节点数为{len(nodes)}，leader_node: {leader_node}, '
-                          f'follower_nodes:{nodes}')
-        print(f'节约了{saved_memory / 8192 / 1024} MB内存')
-
-        continue
+        # # 启发式算法
+        # community_list = {node: [node] for node in node_list}
+        # p = 0.001
+        #
+        # # 对 revoke_num 进行从大到小排序
+        # sorted_revoke_num = sorted(revoke_num.items(), key=lambda x: x[1], reverse=True)
+        #
+        # # 初始化每个节点的可共享内存
+        # remaining_m = {node: 0 for node in node_list}
+        #
+        # # 计算每个节点的初始内存
+        # for node, num in sorted_revoke_num:
+        #     m_prime = 2 ** math.ceil(math.log2(-num * math.log(p)) + 1.057534)
+        #     m = - (num * math.log(p)) / (math.log(2) ** 2)
+        #     remaining_m[node] = m_prime - m  # 每个节点可共享的内存
+        #
+        # # 对 remaining_m 进行从小到大的排序
+        # remaining_m = sorted(remaining_m.items(), key=lambda x: x[1], reverse=False)
+        #
+        # # 依次取出 sorted_revoke_num 中的最大项
+        # saved_memory = 0
+        # while sorted_revoke_num:
+        #     follower_node, msg_num = sorted_revoke_num.pop(0)  # 每次取出第一个元素（最大的）
+        #
+        #     # 遍历 sorted_remaining_m（从小到大排序）
+        #     for leader_node, remaining_memory in remaining_m:
+        #         if follower_node == leader_node:
+        #             continue
+        #
+        #         # 判断延迟约束
+        #         if (delay_matrix[leader_node][follower_node] > MAX_RTT or
+        #                 delay_matrix[follower_node][leader_node] > MAX_RTT):
+        #             continue
+        #
+        #         # 计算 follower_node 需要的内存
+        #         m = - (msg_num * math.log(p)) / (math.log(2) ** 2)
+        #
+        #         # 判断容量约束
+        #         if m > remaining_memory:
+        #             continue
+        #
+        #         # 扣减 leader_node 的剩余内存
+        #         remaining_m_dict = dict(remaining_m)  # 将列表转换为字典进行更新
+        #         remaining_m_dict[leader_node] = remaining_memory - m
+        #         saved_memory += m
+        #
+        #         del remaining_m_dict[follower_node]  # 删除 follower_node 的背包
+        #
+        #         # 重新排序 remaining_m，转换回列表
+        #         remaining_m = sorted(remaining_m_dict.items(), key=lambda x: x[1], reverse=False)
+        #
+        #         # 更新 community_list
+        #         community_list[leader_node].append(follower_node)
+        #         community_list[follower_node].clear()  # 删除 follower_node 的背包
+        #         del community_list[follower_node]
+        #         break
+        #
+        # # 打印结果
+        # count = 0
+        # for leader_node, nodes in community_list.items():  # 使用 .items() 遍历字典
+        #     if nodes:
+        #         count += 1
+        #         if len(nodes) == 1:
+        #             print(f'社区{count:03}的是孤立节点组成的社区:{leader_node}')
+        #         else:
+        #             print(f'社区{count:03}节点数为{len(nodes)}，leader_node: {leader_node}, '
+        #                   f'follower_nodes:{nodes}')
+        # print(f'节约了{saved_memory / 8192 / 1024} MB内存')
+        #
+        # continue
 
         # 2. 将 delay_matrix 转换为 PyTorch Geometric 所需的 edge_index 和 edge_weight
         edge_index_list = []

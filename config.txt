@@ -1,4 +1,11 @@
-# SQLite数据库
+[SQLITE_PATH]
+datasets_db = database/datasets.db
+business_db = database/business.db
+
+[DATASETS_PATH]
+NodeMetrics = C:\Projects\Datasets\cluster-trace-microservices-v2022\data\NodeMetrics
+IWQoS23EdgeMeasurements = C:\Projects\Datasets\IWQoS OpenSource
+
 [sqlite]
 sqlite_path = C:\MyProjects\JWTRevoker_Controller\sqlite.db
 
