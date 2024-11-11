@@ -1,11 +1,6 @@
 import configparser
 import math
-import time
-from typing import Dict, Any, List
-
-import numpy as np
 import random
-from deap import base, creator, tools, algorithms
 from sqlalchemy import create_engine, text, select, func, distinct, and_, Row, RowMapping
 from sqlalchemy.orm import Session
 from ScriptsForDatasets.TableMappers import EdgeTable, NodeTable

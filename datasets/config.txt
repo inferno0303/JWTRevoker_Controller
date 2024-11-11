@@ -1,0 +1,6 @@
+[DB_PATH]
+datasets_db = ./datasets.db
+
+[DATASETS_PATH]
+NodeMetrics = ./cluster-trace-microservices-v2022/data/NodeMetrics
+IWQoS23EdgeMeasurements = ./IWQoS23EdgeMeasurements

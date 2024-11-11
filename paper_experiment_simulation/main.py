@@ -1,6 +1,6 @@
-import os
-import configparser
-
+import sqlalchemy
+from sqlalchemy import select, text, and_
+from sqlalchemy.orm import Session
 import numpy as np
 import pandas
 import math
@@ -10,11 +10,6 @@ from torch.utils.data import DataLoader, TensorDataset
 import torch_geometric
 from torch_geometric.data import Data
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.cluster import KMeans
-
-import sqlalchemy
-from sqlalchemy import select, text, and_
-from sqlalchemy.orm import Session
 
 from database_models.datasets_models import NodeTable, NodeTablePrediction, EdgeTable
 
@@ -74,78 +69,6 @@ class GCN(torch.nn.Module):
         return x
 
 
-def get_database_engine(sqlite_path: str) -> sqlalchemy.engine.Engine:
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.abspath(os.path.join(current_dir, '..'))
-    absolute_sqlite_path = os.path.join(project_root, sqlite_path)  # sqlite_path 是相对路径
-
-    # 检查 SQLite 数据库文件是否存在
-    if not os.path.exists(absolute_sqlite_path):
-        print(f'{absolute_sqlite_path} 文件不存在，正在创建新的数据库文件...')
-        open(absolute_sqlite_path, 'w').close()
-
-    # 连接到 SQLite 数据库
-    engine = sqlalchemy.create_engine(f'sqlite:///{absolute_sqlite_path}')
-
-    # 测试数据库连接
-    try:
-        connection = engine.connect()
-        connection.close()
-    except Exception as e:
-        raise ValueError(f'无法连接到 SQLite 数据库，请检查路径或权限：{absolute_sqlite_path}\n错误信息: {e}')
-
-    return engine
-
-
-# 从数据库加载数据
-def load_data_from_db(engine: sqlalchemy.engine.Engine, start_time: int, end_time: int) -> pandas.DataFrame:
-    with Session(engine) as session:
-        result = session.execute(
-            select(NodeTable.nodeid, NodeTable.time_sequence, NodeTable.cpu_utilization)
-            .where(
-                and_(
-                    NodeTable.time_sequence >= start_time,
-                    NodeTable.time_sequence < end_time
-                )
-            )
-        ).fetchall()
-    return pandas.DataFrame(result, columns=['nodeid', 'time_sequence', 'cpu_utilization'])
-
-
-def prepare_supervised_data(data: pandas.DataFrame, seq_length: int, window_size: int) -> (torch.tensor, torch.tensor):
-    inputs = []
-    targets = []
-
-    # 按 'nodeid' 对数据进行分组
-    node_groups = data.groupby('nodeid')
-
-    for nodeid, group in node_groups:
-        # 按 'time_sequence' 对分组数据排序，确保时间顺序
-        group = group.sort_values(by='time_sequence')
-
-        # 获取当前节点的 CPU 利用率序列
-        utilization = group['cpu_utilization'].values
-
-        # 滑动窗口法提取序列
-        for i in range(0, len(utilization) - seq_length, window_size):
-            # 取 seq_length 长度的序列作为输入
-            inputs.append(utilization[i:i + seq_length])
-
-            # 取序列的下一个时间步（即第 seq_length + 1 个值）作为目标
-            targets.append(utilization[i + seq_length])
-
-    # 将 list 转换为 numpy 数组，再转换为 PyTorch 张量
-    inputs = torch.tensor(np.array(inputs), dtype=torch.float32)
-    targets = torch.tensor(np.array(targets), dtype=torch.float32)
-
-    # LSTM 输入维度应为 [batch_size, seq_length, input_size]，这里 input_size = 1
-    inputs = inputs.unsqueeze(-1)  # 将 inputs 形状从 [batch_size, seq_length] -> [batch_size, seq_length, 1]
-    targets = targets.unsqueeze(-1)  # 将 targets 形状从 [batch_size] -> [batch_size, 1]
-
-    # 转换为 numpy 数组
-    return inputs, targets
-
-
 # 保存模型
 def save_model(model: torch.nn, file_path='lstm_model.pth'):
     torch.save(model.state_dict(), file_path)
@@ -171,6 +94,8 @@ def train_lstm_model(model: torch.nn, loss_fn, optimizer, inputs, targets, epoch
             optimizer.zero_grad()  # 重置梯度
             output = model(batch_inputs)  # 前向传播
             loss = loss_fn(output, batch_targets)  # 计算损失
+            # print('output', output)
+            # print('targets', batch_targets)
             loss.backward()  # 反向传播
             optimizer.step()  # 优化
         if (i + 1) % 10 == 0:
@@ -178,29 +103,29 @@ def train_lstm_model(model: torch.nn, loss_fn, optimizer, inputs, targets, epoch
     return model
 
 
-def predictions(model: torch.nn, data: pandas.DataFrame, prediction_steps: int = 30) -> dict:
-    result = {}  # 存储每个节点的预测结果
+def predictions(model: torch.nn, history_data: pandas.DataFrame, prediction_steps: int) -> dict:
+    # 存储每个节点的预测结果
+    result = {}
+
     model.eval()
     with torch.no_grad():
-
-        for nodeid, group in data.groupby('nodeid'):
-            # 获取当前节点的最新输入序列
+        for nodeid, group in history_data.groupby('nodeid'):
             group = group.sort_values(by='time_sequence')
-            input_seq = group['cpu_utilization'].values[-180:]  # 取最近的 180 个时间步
+            cpu_utilization = group['cpu_utilization'].tail(30).values  # 取最近的30分钟时间步
+            sub_arrays = np.array_split(cpu_utilization, np.arange(10, len(cpu_utilization), 10))
+            average_cpu_utilization = [sub_array.mean() for sub_array in sub_arrays]
 
             # 转换为 PyTorch 张量并调整维度 [1, seq_length, 1]
-            input_seq = torch.tensor(input_seq, dtype=torch.float32).unsqueeze(0).unsqueeze(-1)
+            input_seq = torch.tensor(average_cpu_utilization, dtype=torch.float32).unsqueeze(0).unsqueeze(-1)
 
             # 存储每一步的预测值
             predicted_seq = []
 
-            # 打印最近历史值
-            print(
-                f'History avg {nodeid}: {sum(group['cpu_utilization'].values[-180:].tolist()) / len(group['cpu_utilization'].values[-180:].tolist())}')
-
             for _ in range(prediction_steps):
                 # 使用 LSTM 进行前向传播
                 output = model(input_seq)  # 输出形状为 [1, 1]，即预测下一个时间步
+                # print(f'{nodeid} {_} input_seq:', input_seq)
+                # print(f'{nodeid} {_} prediction output:', output)
 
                 # 记录当前预测值
                 predicted_value = output.item()
@@ -208,13 +133,15 @@ def predictions(model: torch.nn, data: pandas.DataFrame, prediction_steps: int =
 
                 # 更新输入序列，将预测出的值作为下一个输入
                 input_seq = torch.cat((input_seq[:, 1:, :], output.unsqueeze(0)), dim=1)
-                # input_seq 的形状保持为 [1, seq_length, 1]，滑动窗口效果
 
             # 保存预测结果
             result[nodeid] = predicted_seq
 
+            # 打印历史值
+            print(f'History avg: {nodeid}: {group['cpu_utilization'].mean()}')
+
             # 打印预测值
-            print(f'Prediction avg: {nodeid}: {sum(predicted_seq) / len(predicted_seq)}\n')
+            print(f'Prediction avg: {nodeid}: {sum(predicted_seq) / len(predicted_seq)}')
 
     return result
 
@@ -242,6 +169,7 @@ def save_prediction_to_db(time_sequence: int, prediction_result: dict, engine: s
             session.close()
 
 
+# 查询图的边（用于延迟）
 def query_edges_delay(t: int, engine: sqlalchemy.engine.Engine) -> pandas.DataFrame:
     with Session(engine) as session:
         result = session.execute(
@@ -256,6 +184,7 @@ def query_edges_delay(t: int, engine: sqlalchemy.engine.Engine) -> pandas.DataFr
         return pandas.DataFrame(result, columns=['time_sequence', 'src_node', 'dst_node', 'tcp_out_delay'])
 
 
+# 查询图的节点属性（用于撤回数量）
 def query_nodes_utilization(t: int, engine: sqlalchemy.engine.Engine) -> pandas.DataFrame:
     with Session(engine) as session:
         result = session.execute(
@@ -270,12 +199,12 @@ def query_nodes_utilization(t: int, engine: sqlalchemy.engine.Engine) -> pandas.
         return pandas.DataFrame(result, columns=['time_sequence', 'nodeid', 'cpu_utilization'])
 
 
-# 计算欧几里得距离
+# 计算欧几里得距离（用于GCN损失函数）
 def euclidean_distance(x, y):
     return torch.sqrt(torch.sum((x - y) ** 2, dim=-1))
 
 
-# 计算对比损失
+# 计算对比损失（用于GCN损失函数）
 def contrastive_loss(embeddings, positive_pairs, negative_pairs, margin=1.0):
     # 初始化损失
     loss = 0.0
@@ -354,12 +283,17 @@ def contrastive_loss(embeddings, positive_pairs, negative_pairs, margin=1.0):
 
 
 def main():
-    config = configparser.ConfigParser()
-    config.read('../config.txt', encoding='utf-8')
+    # 连接数据库
+    sqlite_path = '../datasets/datasets.db'
+    engine = sqlalchemy.create_engine(f'sqlite:///{sqlite_path}')
 
-    # 数据库连接
-    SQLITE_PATH = config.get('SQLITE_PATH', 'datasets_db')
-    engine = get_database_engine(SQLITE_PATH)
+    # 尝试删除撤回率预测表 `node_table_prediction`
+    with engine.connect() as conn:
+        try:
+            conn.execute(text('DROP TABLE IF EXISTS node_table_prediction;'))
+            print("Table node_table_prediction dropped successfully.")
+        except Exception as e:
+            print(f"An error occurred while dropping the table: {e}")
 
     '''
     定义 LSTM 模型参数
@@ -367,7 +301,7 @@ def main():
 
     # 初始化 LSTM 模型参数
     lstm_input_size = 1  # 每个时间步（time step）输入特征的维度
-    lstm_hidden_size = 128  # 隐状态（hidden state）和细胞状态（cell state）的特征维度大小
+    lstm_hidden_size = 32  # 隐状态（hidden state）和细胞状态（cell state）的特征维度大小
     lstm_output_size = 1  # 每个时间步（time step）输出特征的维度
     lstm_num_layers = 1  # 堆叠 LSTM 层的数量
 
@@ -377,17 +311,6 @@ def main():
 
     lstm_loss_fn = torch.nn.MSELoss()  # 损失函数
     lstm_optimizer = torch.optim.Adam(new_lstm_model.parameters(), lr=0.001)  # 模型优化器
-
-    # 清空 撤回率预测表 node_table_prediction
-    with engine.connect() as connection:
-        try:
-            connection.execute(text('DROP TABLE node_table_prediction;'))
-            print("Table node_table_prediction dropped successfully.")
-        except Exception as e:
-            print(f"An error occurred: {e}")
-
-    # 历史数据滑动窗口
-    history_range = 180  # 180时间步，在这里指180分钟
 
     '''
     定义 GCN 模型参数
@@ -413,23 +336,69 @@ def main():
         基于 LSTM 预测各节点的撤回数量
         '''
 
-        # 从数据库加载数据
-        start_time = max(0, t - history_range * 60)
+        # 从数据库加载历史数据
+        start_time = max(0, t - 180 * 60)
         end_time = t
-        data = load_data_from_db(engine, start_time, end_time)
-        if len(data) == 0: continue
+        with Session(engine) as session:
+            result = session.execute(
+                select(NodeTable.nodeid, NodeTable.time_sequence, NodeTable.cpu_utilization)
+                .where(
+                    and_(
+                        NodeTable.time_sequence >= start_time,
+                        NodeTable.time_sequence < end_time
+                    )
+                )
+            ).fetchall()
+        history_data = pandas.DataFrame(result, columns=['nodeid', 'time_sequence', 'cpu_utilization'])
+        if len(history_data) == 0: continue
 
-        # 创建监督学习的样本数据
-        inputs, targets = prepare_supervised_data(data, seq_length=10, window_size=1)
+        # 创建 LSTM 监督学习的数据样本
+        seq_length = 3
+        window_size = 1
+        inputs = []
+        targets = []
+
+        # 按 'nodeid' 对数据进行分组
+        for nodeid, group in history_data.groupby('nodeid'):
+            group = group.sort_values(by='time_sequence')
+
+            # 对 'cpu_utilization' 列的每10个数据点分组求平均，计算平均值结果加入列表
+            cpu_utilization = group['cpu_utilization'].values
+            sub_arrays = np.array_split(cpu_utilization, np.arange(10, len(cpu_utilization), 10))
+            average_cpu_utilization = [sub_array.mean() for sub_array in sub_arrays]
+
+            # 基于滑动窗口，创建监督学习序列和目标值
+            if len(average_cpu_utilization) < seq_length: continue
+
+            if len(average_cpu_utilization) == seq_length:
+                input_seq = average_cpu_utilization
+                target_value = sum(average_cpu_utilization) / len(average_cpu_utilization)
+                inputs.append(input_seq)
+                targets.append(target_value)
+
+            if len(average_cpu_utilization) > seq_length:
+                for start in range(0, len(average_cpu_utilization) - seq_length, window_size):
+                    input_seq = average_cpu_utilization[start: start + seq_length]
+                    target_value = average_cpu_utilization[start + seq_length]
+                    inputs.append(input_seq)
+                    targets.append(target_value)
+
+        # 转换为 PyTorch Tensor 类型
+        inputs = torch.tensor(inputs, dtype=torch.float32)
+        targets = torch.tensor(targets, dtype=torch.float32)
+
+        # LSTM 输入维度应为 [batch_size, seq_length, input_size]，这里 input_size = 1
+        inputs = inputs.unsqueeze(-1)  # 将 inputs 形状从 [batch_size, seq_length] -> [batch_size, seq_length, 1]
+        targets = targets.unsqueeze(-1)  # 将 targets 形状从 [batch_size] -> [batch_size, 1]
 
         # 从硬盘加载 LSTM 模型
         lstm_model = load_model(new_lstm_model, file_path='lstm_model.pth')
 
         # 训练 LSTM 模型
-        lstm_model = train_lstm_model(lstm_model, lstm_loss_fn, lstm_optimizer, inputs, targets, epoch=50)
+        lstm_model = train_lstm_model(lstm_model, lstm_loss_fn, lstm_optimizer, inputs, targets, epoch=500)
 
         # 预测撤回率
-        predictions_result = predictions(lstm_model, data, prediction_steps=30)
+        predictions_result = predictions(lstm_model, history_data, prediction_steps=3)
 
         # 将预测结果写入数据库
         save_prediction_to_db(t, predictions_result, engine)
@@ -612,16 +581,16 @@ def main():
         # 创建监督学习 y 标签结束
 
         # 创建 PyTorch Geometric 数据对象
-        data = Data(x=node_features_tensor, edge_index=edge_index_tensor)
+        history_data = Data(x=node_features_tensor, edge_index=edge_index_tensor)
 
         '''
         在线训练 GCN 模型
         '''
         gcn_model.train()
-        for epoch in range(2000):
+        for epoch in range(500):
             gcn_optimizer.zero_grad()  # 清空梯度
             # 获取模型输出的嵌入
-            embeddings = gcn_model(data)
+            embeddings = gcn_model(history_data)
             # 计算对比损失
             loss = contrastive_loss(embeddings, positive_pairs, negative_pairs, margin=1.0)
 
@@ -637,7 +606,7 @@ def main():
         评估 GCN 模型
         '''
         gcn_model.eval()
-        node_embeddings = gcn_model(data)  # 传入图数据，然后基于训练好的模型生成每个节点的嵌入表示 node_embeddings
+        node_embeddings = gcn_model(history_data)  # 传入图数据，然后基于训练好的模型生成每个节点的嵌入表示 node_embeddings
 
         print('GCN推理图嵌入结果', node_embeddings)
 

@@ -12,38 +12,27 @@ import queue
 from datetime import datetime
 
 import sqlalchemy
-from sqlalchemy import create_engine, text, Index
+from sqlalchemy import text, Index
 from sqlalchemy.orm import Session
 
 from database_models.datasets_models import IWQoS23EdgeMeasurements
 
-# 读取配置文件
-config = configparser.ConfigParser()
-config.read('../config.txt', encoding='utf-8')
-
-# 获取数据库路径
-SQLITE_PATH = config.get('SQLITE_PATH', 'datasets_db')
-
 
 def get_database_engine(sqlite_path: str) -> sqlalchemy.engine.Engine:
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.abspath(os.path.join(current_dir, '..'))
-    absolute_sqlite_path = os.path.join(project_root, sqlite_path)  # sqlite_path 是相对路径
-
     # 检查 SQLite 数据库文件是否存在
-    if not os.path.exists(absolute_sqlite_path):
-        print(f'{absolute_sqlite_path} 文件不存在，正在创建新的数据库文件...')
-        open(absolute_sqlite_path, 'w').close()
+    if not os.path.exists(sqlite_path):
+        print(f'{sqlite_path} 文件不存在，正在创建新的数据库文件...')
+        open(sqlite_path, 'w').close()
 
     # 连接到 SQLite 数据库
-    engine = create_engine(f'sqlite:///{absolute_sqlite_path}')
+    engine = sqlalchemy.create_engine(f'sqlite:///{sqlite_path}')
 
     # 测试数据库连接
     try:
         connection = engine.connect()
         connection.close()
     except Exception as e:
-        raise ValueError(f'无法连接到 SQLite 数据库，请检查路径或权限：{absolute_sqlite_path}\n错误信息: {e}')
+        raise ValueError(f'无法连接到 SQLite 数据库，请检查路径或权限：{sqlite_path}\n错误信息: {e}')
 
     return engine
 
@@ -148,7 +137,10 @@ def read_zip_csv_and_insert_to_db(zip_file_path: str, nodeid_list: list[str], in
 
 
 def insert_to_db(insert_queue: queue.Queue, table_mapper: sqlalchemy.orm.Mapper):
-    engine = get_database_engine(SQLITE_PATH)
+    config = configparser.ConfigParser()
+    config.read('config.txt', encoding='utf-8')
+    db_path = config.get('DB_PATH', 'datasets_db')
+    engine = get_database_engine(db_path)
     count = 0
 
     def insert_batch(batch_):
@@ -223,17 +215,32 @@ def reorganize_table(engine: sqlalchemy.engine.Engine, table_cls):
 def main():
     start_time = time.time()
 
+    # 读取配置文件
+    config = configparser.ConfigParser()
+    config.read('config.txt', encoding='utf-8')
+
+    '''
+    初始化数据库
+    '''
+
+    # 获取数据库路径
+    db_path = config.get('DB_PATH', 'datasets_db')
+
     # 初始化数据库连接
-    engine = get_database_engine(SQLITE_PATH)
+    engine = get_database_engine(db_path)
 
     # 初始化数据表
     IWQoS23EdgeMeasurements.metadata.create_all(engine)
 
-    # 数据集路径
-    file_path = config.get('DATASETS_PATH', 'IWQoS23EdgeMeasurements')
+    '''
+    分析数据集
+    '''
+
+    #  获取 DATASETS_PATH 下 IWQoS23EdgeMeasurements 路径
+    datasets_path = config.get('DATASETS_PATH', 'IWQoS23EdgeMeasurements')
 
     # 查找 'dataset.zip' 文件
-    file_list = sorted(glob.glob(os.path.join(file_path, 'dataset.zip')))
+    file_list = sorted(glob.glob(os.path.join(datasets_path, 'dataset.zip')))
 
     # 统计 edge 的频次
     edge_counter = collections.Counter()
@@ -252,6 +259,10 @@ def main():
             break
         nodeid_list.update([src_node, dst_node])
     nodeid_list = list(nodeid_list)
+
+    '''
+    写入数据库
+    '''
 
     # 创建队列用于将数据插入数据库
     manager = multiprocessing.Manager()
