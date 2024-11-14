@@ -1,6 +1,6 @@
+import os
 from typing import Tuple, List, Dict
 import sqlalchemy
-from sklearn.cluster import KMeans
 from sqlalchemy import select, text, and_, distinct
 from sqlalchemy.orm import Session
 import numpy as np
@@ -10,8 +10,11 @@ import itertools
 import torch
 import torch_geometric
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.cluster import SpectralClustering
 
 from database_models.datasets_models import NodeTable, NodeTablePrediction, EdgeTable
+
+os.environ["LOKY_MAX_CPU_COUNT"] = "4"
 
 # 撤回上限（每分钟每次）
 MAX_REVOKE_COUNT = 10000000
@@ -27,10 +30,9 @@ log_p_false_target = math.log(P_FALSE_TARGET)
 log2_squared = math.log(2) ** 2
 
 
-# 定义LSTM模型
-class LSTMModel(torch.nn.Module):
+class LSTM(torch.nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, output_size):
-        super(LSTMModel, self).__init__()
+        super(LSTM, self).__init__()
         self.lstm = torch.nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
         self.linear = torch.nn.Linear(hidden_size, output_size)
 
@@ -42,42 +44,17 @@ class LSTMModel(torch.nn.Module):
         return out
 
 
-class GCN(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, dropout=0.5):
-        super(GCN, self).__init__()
+class GAT(torch.nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels, num_heads=16):
+        super(GAT, self).__init__()
+        self.gat1 = torch_geometric.nn.GATConv(in_channels, hidden_channels, heads=num_heads)
+        self.gat2 = torch_geometric.nn.GATConv(hidden_channels * num_heads, out_channels, heads=1, concat=False)
 
-        self.dropout = dropout
-        # 第一层图卷积，将输入特征映射到隐藏层1
-        self.conv1 = torch_geometric.nn.GCNConv(in_channels, hidden_channels)
-
-        # 第二层图卷积，进一步将隐藏层1的输出映射到隐藏层2
-        self.conv2 = torch_geometric.nn.GCNConv(hidden_channels, out_channels)
-
-    def forward(self, data):
-        x, edge_index = data.x, data.edge_index
-
-        # 第一层卷积 + ReLU
-        x = self.conv1(x, edge_index)
-        x = torch.nn.functional.relu(x)
-
-        # 加入 dropout
-        # x = torch.nn.functional.dropout(x, p=self.dropout, training=self.training)
-
-        # 第二层卷积
-        x = self.conv2(x, edge_index)
-
+    def forward(self, x, edge_index):
+        x = self.gat1(x, edge_index)
+        x = self.gat2(x, edge_index)
+        x = torch.nn.functional.sigmoid(x)
         return x
-
-
-# 保存 Pytorch 模型
-def save_model(model: torch.nn.Module, file_path: str):
-    torch.save(model.state_dict(), file_path)
-
-
-# 加载 Pytorch 模型
-def load_model(model: torch.nn.Module, file_path: str) -> torch.nn.Module:
-    model.load_state_dict(torch.load(file_path, weights_only=True))
-    return model
 
 
 # 查询节点历史数据，用于 LSTM 模型训练输入
@@ -162,7 +139,7 @@ def train_lstm_model(model: torch.nn.Module, inputs: torch.Tensor, targets: torc
             loss.backward()  # 反向传播
             optimizer.step()  # 优化
         if (i + 1) % 100 == 0:
-            print(f'LSTM train epoch {i + 1} / {epoch}, Loss: {loss.item():.4f}')
+            print(f'LSTM training epoch {i + 1} / {epoch}, Loss: {loss.item():.4f}')
     return model
 
 
@@ -203,6 +180,7 @@ def predictions_by_lstm(model: torch.nn.Module, history_data: pd.DataFrame, pred
     return result
 
 
+# 保存节点撤回数结果到数据库
 def save_prediction_to_db(engine: sqlalchemy.Engine, t: int, result: Dict[str, List]):
     NodeTablePrediction.metadata.create_all(engine)  # 如果不存在数据表，则创建数据表
     with Session(engine) as session:
@@ -270,101 +248,142 @@ def query_nodes_predictions(t: int, engine: sqlalchemy.Engine) -> pd.DataFrame:
         return pd.DataFrame(result, columns=['time_sequence', 'nodeid', 'cpu_utilization'])
 
 
-# 计算欧几里得距离（用于GCN损失函数）
-def euclidean_distance(x, y):
-    return torch.sqrt(torch.sum((x - y) ** 2, dim=-1))
+# 创建 GAT 模型训练数据集
+def create_gat_dataset(engine: sqlalchemy.Engine, t: int, communities: Dict):
+    node_features = []  # 节点属性
+    edge_index = []  # 边
+    similarity_matrix = np.zeros((200, 200))  # 相当于y标签
+
+    nodeid_list = query_all_nodeid(t, engine)
+
+    # 查询数据
+    with Session(engine) as session:
+
+        # 构建 Node Features
+        print(f'构建 Node Features（节点特征）')
+        for nodeid in nodeid_list:
+            result = session.execute(
+                select(NodeTablePrediction.cpu_utilization)
+                .where(
+                    and_(
+                        NodeTablePrediction.time_sequence >= t,
+                        NodeTablePrediction.time_sequence < t + 1800,
+                        NodeTablePrediction.nodeid == nodeid
+                    )
+                )
+            ).scalars().all()
+            if result:
+                average_cpu_utilization = sum(result) / len(result)
+                # 计算每个节点的撤回数量
+                revoke_num = int(average_cpu_utilization * MAX_REVOKE_COUNT)
+                # 计算每个节点的内存需求
+                required_mem = - (revoke_num * log_p_false_target) / log2_squared
+                # 计算每个节点的内存分配值
+                alloc_mem = 2 ** math.ceil(math.log2(required_mem))
+                # 计算每个节点的可共享内存值
+                shareable_mem = alloc_mem - required_mem
+                # 根据每个节点的计算结果构建特征向量
+                node_features.append([shareable_mem, required_mem])
+
+        # 将 node_features 转换为 numpy 数组，然后归一化，并转换为 PyTorch 张量
+        node_features = np.array(node_features)
+        node_features_scaled = MinMaxScaler().fit_transform(node_features)
+        node_features_tensor = torch.tensor(node_features_scaled, dtype=torch.float)
+
+        # 构建 Edge Index
+        print(f'构建 Edge Index（图的边集）')
+        for node_pair in itertools.combinations(nodeid_list, 2):
+            node_a, node_b = node_pair
+            # 查询数据库
+            rtt_1_result = session.execute(
+                select(EdgeTable.tcp_out_delay)
+                .where(
+                    and_(
+                        EdgeTable.time_sequence >= t,
+                        EdgeTable.time_sequence < t + 1800,
+                        EdgeTable.src_node == node_a,
+                        EdgeTable.dst_node == node_b
+                    )
+                )
+            ).scalars().all()
+            rtt_2_result = session.execute(
+                select(EdgeTable.tcp_out_delay)
+                .where(
+                    and_(
+                        EdgeTable.time_sequence >= t,
+                        EdgeTable.time_sequence < t + 1800,
+                        EdgeTable.src_node == node_b,
+                        EdgeTable.dst_node == node_a
+                    )
+                )
+            ).scalars().all()
+            if rtt_1_result and rtt_2_result:
+                avg_rtt_1 = sum(rtt_1_result) / len(rtt_1_result)
+                avg_rtt_2 = sum(rtt_2_result) / len(rtt_2_result)
+                # 如果双向边权重不超过阈值，则连接节点对
+                if (avg_rtt_1 + avg_rtt_2) / 2 <= MAX_RTT:
+                    edge_index.append([nodeid_list.index(node_a), nodeid_list.index(node_b)])
+                    edge_index.append([nodeid_list.index(node_b), nodeid_list.index(node_a)])
+
+    # 将 edge_index 转换为 numpy 数组，然后转置，并转换为 PyTorch 张量
+    edge_index = np.array(edge_index).T
+    edge_index_tensor = torch.tensor(edge_index, dtype=torch.long)
+
+    # 构建相似度矩阵
+    print(f'构建 Similarity Matrix（相似度矩阵）')
+    nodeid_index_map = {node_id: index for index, node_id in enumerate(nodeid_list)}
+    for leader, followers in communities.items():
+        leader_idx = nodeid_index_map[leader]
+        similarity_matrix[leader_idx, leader_idx] = 1
+        if followers:
+            for follower in followers:
+                follower_idx = nodeid_index_map[follower]
+                similarity_matrix[follower_idx, follower_idx] = 1
+                similarity_matrix[leader_idx, follower_idx] = 1
+                similarity_matrix[follower_idx, leader_idx] = 1
+    similarity_matrix = torch.tensor(similarity_matrix, dtype=torch.float)
+
+    return node_features_tensor, edge_index_tensor, similarity_matrix
 
 
-# 计算对比损失（用于GCN损失函数）
-def contrastive_loss(embeddings, positive_pairs: List, negative_pairs: List, margin=1.0):
-    # 初始化损失
-    loss_total = 0.0
-    pos_loss_total = 0.0
-    neg_loss_total = 0.0
+# 训练 GAT 模型
+def train_gat_model(gat_model: torch.nn.Module, node_features_tensor, edge_index_tensor, similarity_matrix):
+    gat_model.load_state_dict(torch.load('gat_model.pth', weights_only=True))
+    optimizer = torch.optim.Adam(gat_model.parameters(), lr=0.001)
 
-    # 正样本损失：最小化同一社区的节点对的距离
-    for i, j in positive_pairs:
-        pos_loss = euclidean_distance(embeddings[i], embeddings[j])
-        pos_loss_total += pos_loss  # 加入正样本损失
-    print(pos_loss_total)
+    patience = 2000  # 当验证损失没有改善超过2000个epoch时停止
+    best_loss = float('inf')  # 初始设置为无穷大
+    patience_counter = 0  # 用于计数连续没有改善的epoch
 
-    # 负样本损失：最大化不同社区的节点对的距离
-    for i, j in negative_pairs:
-        neg_loss = torch.nn.functional.relu(margin - euclidean_distance(embeddings[i], embeddings[j]))
-        neg_loss_total += neg_loss  # 加入负样本损失
-    print(neg_loss_total)
+    gat_model.train()
+    for epoch in range(20000):
+        optimizer.zero_grad()
+        output_matrix = gat_model(node_features_tensor, edge_index_tensor)
+        loss = torch.nn.functional.binary_cross_entropy(output_matrix, similarity_matrix)  # 交叉损失
+        loss.backward()
+        optimizer.step()
 
-    loss_total = pos_loss_total + neg_loss_total
-    return loss_total
+        # 打印进度
+        if (epoch + 1) % 500 == 0:
+            print(f'GAT training epoch {epoch + 1}, Loss: {loss}')
 
+        # 监控验证损失，执行早停
+        if loss.item() < best_loss:
+            best_loss = loss.item()
+            patience_counter = 0  # 如果有改善，重置耐心计数器
+            # 保存当前最好的模型
+            torch.save(gat_model.state_dict(), 'gat_model.pth')
+        else:
+            patience_counter += 1
 
-def community_partition(node_embeddings, nodeid_list):
-    """
-    利用 KMeans 聚类并结合约束条件进行社区划分，通过动态调整社区数量，直到所有节点分配到符合约束的社区
-    """
-    node_embeddings_np = node_embeddings.detach().cpu().numpy()
-    for n_clusters in range(1, len(nodeid_list) + 1):
-        _kmeans = KMeans(n_clusters=n_clusters)
-        result = _kmeans.fit_predict(node_embeddings_np)
-        print(result)
+        # 如果耐心值超过阈值，则提前停止训练
+        if patience_counter >= patience:
+            print(f"GAT training early stopping at epoch {epoch}, best loss is {best_loss}")
+            break
 
-
-# def k_means(node_embeddings, nodeid_list: [str]):
-#     """
-#     利用KMeans聚类并结合约束条件进行社区划分。
-#     动态调整社区数量，直到所有节点分配到符合约束的社区。
-#     """
-#     node_embeddings_np = node_embeddings.detach().cpu().numpy()
-#     for n_clusters in range(1, len(nodeid_list) + 1):
-#         kmeans = KMeans(n_clusters=n_clusters)
-#         # 基于嵌入结果进行社区划分
-#         kmeans_result = kmeans.fit_predict(node_embeddings_np)
-#         print(kmeans_result)
-#         continue
-#         communities = {i: [] for i in range(n_clusters)}
-#
-#         # 评估社区划分结果
-#         for idx, label in enumerate(kmeans_result):
-#             communities[label].append({
-#                 'node_uid': nodeid_list[idx],
-#                 'revoke_num': revoke_num[nodeid_list[idx]]
-#             })
-#
-#         valid_communities = []
-#         all_valid = True
-#
-#         # 检查社区是否满足约束条件
-#         for label, nodes in communities.items():
-#             if not nodes: continue
-#             leader_node = max(nodes, key=lambda x: x['revoke_num'])
-#             leader_node_n = leader_node['revoke_num']
-#             m_prime = 2 ** math.ceil(math.log2(-leader_node_n * math.log(p)) + 1.057534)
-#             m = - (leader_node_n * math.log(p)) / (math.log(2) ** 2)
-#             delta_m = m_prime - m
-#
-#             print(f'community_num: {n_clusters}, leader_node: {leader_node['node_uid']},'
-#                   f' leader_node_n: {leader_node_n}, m_prime: {m_prime / 8192 / 1024:04f}MB,'
-#                   f' m: {m / 8192 / 1024:04f}MB, delta_m: {delta_m / 8192 / 1024:04f}MB')
-#
-#             follower_node_n = sum(i['revoke_num'] for i in nodes) - leader_node_n
-#             follower_node_m = - (follower_node_n * math.log(p)) / (math.log(2) ** 2)
-#
-#             print(f'community_num: {n_clusters}, follower_node_num: {len(nodes) - 1},'
-#                   f' follower_node_n: {follower_node_n}, follower_node_m: {follower_node_m / 8192 / 1024} MB')
-#
-#             if follower_node_m > delta_m:  # 不满足约束
-#                 all_valid = False
-#                 print(f'KMeans {n_clusters} 个社区不满足约束')
-#                 break
-#
-#             valid_communities.append((label, nodes))
-#
-#         # 如果所有社区都满足约束条件，则返回
-#         if all_valid:
-#             return valid_communities
-#
-#     # 如果达到了最大社区数量，仍然不能满足约束，则返回空或其他处理逻辑
-#     return []
+    # 加载最佳模型
+    gat_model.load_state_dict(torch.load('gat_model.pth', weights_only=True))
+    return gat_model
 
 
 def main():
@@ -381,31 +400,16 @@ def main():
             print(f"An error occurred while dropping the table: {e}")
 
     '''
-    定义 LSTM 模型参数
+    初始化 LSTM 模型
     '''
-
-    # 初始化 LSTM 模型参数
-    lstm_input_size = 1  # 每个时间步（time step）输入特征的维度
-    lstm_hidden_size = 32  # 隐状态（hidden state）和细胞状态（cell state）的特征维度大小
-    lstm_output_size = 1  # 每个时间步（time step）输出特征的维度
-    lstm_num_layers = 1  # 堆叠 LSTM 层的数量
-
-    # 创建 LSTM 模型
-    lstm_model = LSTMModel(lstm_input_size, lstm_hidden_size, lstm_output_size, lstm_num_layers)
-    save_model(lstm_model, file_path='lstm_model.pth')
+    lstm_model = LSTM(input_size=1, hidden_size=32, num_layers=1, output_size=1)
+    torch.save(lstm_model.state_dict(), 'lstm_model.pth')
 
     '''
-    定义 GCN 模型参数
+    初始化 GAT 模型
     '''
-
-    # 定义 GCN 模型参数
-    gcn_in_channels = 2  # 节点初始属性维度
-    gcn_hidden_channels = 64  # 隐藏层的维度
-    gcn_out_channels = 1  # 最后输出的嵌入维度
-
-    # 创建 GCN 模型实例
-    gcn_model = GCN(gcn_in_channels, gcn_hidden_channels, gcn_out_channels)
-    save_model(gcn_model, file_path='gcn_model.pth')
+    gat_model = GAT(in_channels=2, hidden_channels=64, out_channels=200, num_heads=16)
+    torch.save(gat_model.state_dict(), 'gat_model.pth')
 
     # 模拟在线训练和预测
     for t in range(0, 72 * 3600, 1800):
@@ -415,6 +419,7 @@ def main():
         '''
         基于 LSTM 预测各节点的撤回数量
         '''
+        print(f'基于 LSTM 预测各节点的撤回数量')
 
         # 查询节点历史数据，用于 LSTM 模型训练输入
         graph_data = query_node_history(t, engine)
@@ -432,8 +437,7 @@ def main():
         targets = targets.unsqueeze(-1)  # 将 targets 形状从 [batch_size] -> [batch_size, 1]
 
         # 从硬盘加载 LSTM 模型
-        lstm_model = LSTMModel(lstm_input_size, lstm_hidden_size, lstm_output_size, lstm_num_layers)
-        lstm_model = load_model(lstm_model, file_path='lstm_model.pth')
+        lstm_model.load_state_dict(torch.load('lstm_model.pth', weights_only=True))
 
         # 训练 LSTM 模型
         lstm_model = train_lstm_model(lstm_model, inputs, targets)
@@ -445,14 +449,13 @@ def main():
         save_prediction_to_db(engine, t, result)
 
         # 保存 LSTM 模型
-        save_model(lstm_model, file_path='lstm_model.pth')
+        torch.save(lstm_model.state_dict(), 'lstm_model.pth')
 
         '''
         启发式算法开始
         '''
 
         print(f'启发式算法：构建图数据')
-
         # 查询并构建图数据
         nodeid_list = query_all_nodeid(t, engine)
         nodes_df = query_nodes_predictions(t, engine)  # 查询预测的撤回数量
@@ -521,165 +524,71 @@ def main():
         print(f'节约了{memory_saved / 8192 / 1024 / 1024 * 48:.4f} GB内存\n')
 
         '''
-        准备 GCN 模型在线学习数据集
-        构建 Node Features 节点特征 和 Edge Index 图的边集，以及 y 标签用于监督学习
+        准备 GAT 模型在线学习数据集：Node Features（节点特征）、Edge Index（图的边集）以及 Similarity Matrix（相似度矩阵）
         '''
-
-        print(f'GCN 模型在线学习：构建数据集')
-
-        node_features = []
-        edge_index = []
-
-        # 查询数据
-        with Session(engine) as session:
-
-            # 构建 Node Features
-            for nodeid in nodeid_list:
-                result = session.execute(
-                    select(NodeTablePrediction.cpu_utilization)
-                    .where(
-                        and_(
-                            NodeTablePrediction.time_sequence >= t,
-                            NodeTablePrediction.time_sequence < t + 1800,
-                            NodeTablePrediction.nodeid == nodeid
-                        )
-                    )
-                ).scalars().all()
-                if result:
-                    average_cpu_utilization = sum(result) / len(result)
-                    # 计算每个节点的撤回数量
-                    revoke_num = int(average_cpu_utilization * MAX_REVOKE_COUNT)
-                    # 计算每个节点的内存需求
-                    required_mem = - (revoke_num * log_p_false_target) / log2_squared
-                    # 计算每个节点的内存分配值
-                    alloc_mem = 2 ** math.ceil(math.log2(required_mem))
-                    # 计算每个节点的可共享内存值
-                    shareable_mem = alloc_mem - required_mem
-                    # 根据每个节点的计算结果构建特征向量
-                    node_features.append([shareable_mem, required_mem])
-
-            # 构建 Edge Index
-            for node_pair in itertools.combinations(nodeid_list, 2):
-                node_a, node_b = node_pair
-                # 查询数据库
-                rtt_1_result = session.execute(
-                    select(EdgeTable.tcp_out_delay)
-                    .where(
-                        and_(
-                            EdgeTable.time_sequence >= t,
-                            EdgeTable.time_sequence < t + 1800,
-                            EdgeTable.src_node == node_a,
-                            EdgeTable.dst_node == node_b
-                        )
-                    )
-                ).scalars().all()
-                rtt_2_result = session.execute(
-                    select(EdgeTable.tcp_out_delay)
-                    .where(
-                        and_(
-                            EdgeTable.time_sequence >= t,
-                            EdgeTable.time_sequence < t + 1800,
-                            EdgeTable.src_node == node_b,
-                            EdgeTable.dst_node == node_a
-                        )
-                    )
-                ).scalars().all()
-                if rtt_1_result and rtt_2_result:
-                    avg_rtt_1 = sum(rtt_1_result) / len(rtt_1_result)
-                    avg_rtt_2 = sum(rtt_2_result) / len(rtt_2_result)
-                    # 如果双向边权重不超过阈值，则连接节点对
-                    if (avg_rtt_1 + avg_rtt_2) / 2 <= MAX_RTT:
-                        edge_index.append([nodeid_list.index(node_a), nodeid_list.index(node_b)])
-                        edge_index.append([nodeid_list.index(node_b), nodeid_list.index(node_a)])
-
-        # 将 node_features 转换为 numpy 数组，然后归一化，并转换为 PyTorch 张量
-        node_features = np.array(node_features)
-        node_features_scaled = MinMaxScaler().fit_transform(node_features)
-        # print(f'node_features: {node_features}')
-        node_features_tensor = torch.tensor(node_features_scaled, dtype=torch.float)
-
-        # 将 edge_index 转换为 numpy 数组，然后转置，并转换为 PyTorch 张量
-        edge_index = np.array(edge_index).T
-        edge_index_tensor = torch.tensor(edge_index, dtype=torch.long)
-
-        # 创建 PyTorch Geometric 数据对象
-        graph_data = torch_geometric.data.Data(x=node_features_tensor, edge_index=edge_index_tensor)
-
-        # 根据 communities 创建 y 标签
-        positive_pairs = []
-        negative_pairs = []
-
-        nodeid_list = query_all_nodeid(t, engine)
-
-        # 创建正样本对：相同社区的节点对
-        for leader, followers in communities.items():
-            if followers:
-                community_indices = [nodeid_list.index(leader)]
-                for follower in followers:
-                    community_indices.append(nodeid_list.index(follower))
-                positive_pairs.extend(itertools.combinations(community_indices, 2))
-
-        # 创建负样本对：不同社区的节点对
-        nodeid_list_index = list(range(len(nodeid_list)))
-
-        for node_a_index, node_b_index in itertools.combinations(nodeid_list_index, 2):
-            if (node_a_index, node_b_index) not in positive_pairs and (
-                    node_b_index, node_a_index) not in positive_pairs:
-                negative_pairs.append((node_a_index, node_b_index))
-
-        print(f'正样本节点对数量：{len(positive_pairs)}，负样本节点对数量：{len(negative_pairs)}')
+        print(f'准备 GAT 模型在线学习数据集')
+        node_features_tensor, edge_index_tensor, similarity_matrix = create_gat_dataset(engine, t, communities)
 
         '''
-        在线训练 GCN 模型
+        在线训练 GAT 模型
         '''
-
-        print(f'GCN 模型在线学习：在线训练')
-
-        # 从硬盘加载 GCN 模型
-        gcn_model = GCN(gcn_in_channels, gcn_hidden_channels, gcn_out_channels)
-        gcn_model = load_model(gcn_model, file_path='gcn_model.pth')
-
-        # 定义 GCN 模型优化器
-        gcn_optimizer = torch.optim.Adam(gcn_model.parameters(), lr=0.01, weight_decay=5e-4)  # 添加 L2 正则化
-
-        # 训练 GCN 模型
-        gcn_model.train()
-        for epoch in range(500):
-            print(f'第{epoch}轮训练开始')
-            gcn_optimizer.zero_grad()  # 清空梯度
-            # 获取模型输出的嵌入
-            embeddings = gcn_model(graph_data)
-            # 计算对比损失
-            loss = contrastive_loss(embeddings, positive_pairs, negative_pairs, margin=1.0)
-            if loss < 1.0e-05:
-                break
-
-            # 反向传播和优化
-            loss.backward()
-            gcn_optimizer.step()
-            print(f'第{epoch}轮训练完成，Loss：{loss}')
-
-            # 输出当前 epoch 的损失
-            if (epoch + 1) % 20 == 0:
-                print(f"Epoch {epoch + 1}/{2000}, Loss: {loss}")
-
-        # 保存 GCN 模型
-        save_model(gcn_model, file_path='gcn_model.pth')
+        print(f'在线训练 GAT 模型')
+        gat_model = train_gat_model(gat_model, node_features_tensor, edge_index_tensor, similarity_matrix)
 
         '''
-        评估 GCN 模型
+        使用 GAT 模型推理，并基于谱聚类预测社区划分
         '''
-        gcn_model.eval()
-        node_embeddings = gcn_model(graph_data)  # 传入图数据，然后基于训练好的模型生成每个节点的嵌入表示 node_embeddings
+        print(f'使用 GAT 模型推理，并基于谱聚类预测社区划分')
+        gat_model.eval()
+        with torch.no_grad():
+            output_matrix = gat_model(node_features_tensor, edge_index_tensor)
 
-        print('GCN推理图嵌入结果', node_embeddings)
+        out_matrix_np = output_matrix.numpy()
+        out_matrix_np = (out_matrix_np + out_matrix_np.T) / 2  # 转对称矩阵
 
-        community_partition(node_embeddings, nodeid_list)
+        # 谱聚类
+        sc = SpectralClustering(n_clusters=155, affinity='precomputed', random_state=0)
+        prediction_labels = sc.fit_predict(out_matrix_np)
 
-        # communities = k_means(node_embeddings, nodeid_list, revoke_num)
-        # for i in communities:
-        #     print(f'社区{i[0]}: {i[1]}')
-        # print(f'共划分了{len(communities)}个社区')
+        # 按照预测标签将节点分配到不同的社区
+        community_dict = {int(label): [] for label in prediction_labels}
+        for idx, label in enumerate(prediction_labels):
+            community_dict[int(label)].append(nodeid_list[idx])
+
+        # 整理社区
+        final_community = {}
+        nodes_df = query_nodes_predictions(t, engine)  # 查询预测的撤回数量
+        if len(nodes_df) == 0: continue
+
+        # 计算节点的撤回数量，并转换为字典
+        average_cpu_utilization = nodes_df.groupby('nodeid')['cpu_utilization'].mean()
+        node_revoke_num = (average_cpu_utilization * MAX_REVOKE_COUNT).astype(int).to_dict()
+
+        # 1、计算每个节点所需的内存（memory_required）
+        memory_required = {nodeid: 0.0 for nodeid in nodeid_list}
+        for nodeid, revoke_num in node_revoke_num.items():
+            memory_required[nodeid] = - (revoke_num * log_p_false_target) / log2_squared
+
+        # 2、计算每个节点的可共享内存（shared_memory）
+        shared_memory = {nodeid: 0.0 for nodeid in nodeid_list}
+        for nodeid, required in memory_required.items():
+            shared_memory[nodeid] = 2 ** math.ceil(math.log2(required)) - required
+
+        for label, nodes in community_dict.items():
+            if len(nodes) == 1:
+                final_community[nodes[0]] = []
+            else:
+                # 寻找该社区的 leader 节点
+                leader = max(nodes, key=lambda x: memory_required[x])
+                final_community[leader] = [node for node in nodes if node != leader]
+                memory_saved += sum(memory_required[follower] for follower in final_community[leader])
+
+        # 打印每个社区的领导节点和成员
+        for index, (leader, nodes) in enumerate(final_community.items()):
+            print(f'社区 {index}: {leader}，{"孤立节点社区" if not nodes else nodes}')
+
+        print(f'共 {len(final_community)} 个社区')
+        print(f'节约了{memory_saved / 8192 / 1024 / 1024 * 48:.4f} GB内存\n')
 
 
 if __name__ == '__main__':

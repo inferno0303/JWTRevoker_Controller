@@ -21,3 +21,8 @@ https://drive.google.com/file/d/1wQpTB9DOiacBaISTY4BnmCZxw-OTnFeD
 ```
 /IWQoS23EdgeMeasurements/dataset.zip
 ```
+
+### 执行时间
+
+02_iwqos23.py 执行时间 723秒
+04_edge_table.py 执行时间 4245秒

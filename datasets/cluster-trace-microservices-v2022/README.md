@@ -26,3 +26,8 @@ https://github.com/alibaba/clusterdata/blob/master/cluster-trace-microservices-v
 ```
 bash fetchData.sh start_date=0d0 end_date=3d0
 ```
+
+### 执行用时
+
+01_v2022_node_metrics.py 执行时间 207秒
+03_node_table.py 执行时间 12秒
