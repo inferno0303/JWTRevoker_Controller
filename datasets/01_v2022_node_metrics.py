@@ -185,6 +185,7 @@ def main():
     # 读取配置文件
     config = configparser.ConfigParser()
     config.read('config.txt', encoding='utf-8')
+    node_num = int(config.get('NODE_NUM', 'node_num'))
 
     '''
     初始化数据库
@@ -218,8 +219,8 @@ def main():
     for fut in concurrent.futures.as_completed(futures):
         nodeid_counter.update(fut.result())
 
-    # 提取出现频率最高的 200 个 nodeid
-    nodeid_list = [k for k, _ in sorted(nodeid_counter.items(), key=lambda item: (-item[1], item[0]))[:200]]
+    # 提取出现频率最高的 node_num 个 nodeid
+    nodeid_list = [k for k, _ in sorted(nodeid_counter.items(), key=lambda item: (-item[1], item[0]))[:node_num]]
 
     '''
     写入数据库

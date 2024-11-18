@@ -218,6 +218,7 @@ def main():
     # 读取配置文件
     config = configparser.ConfigParser()
     config.read('config.txt', encoding='utf-8')
+    node_num = int(config.get('NODE_NUM', 'node_num'))
 
     '''
     初始化数据库
@@ -251,11 +252,12 @@ def main():
     for fut in concurrent.futures.as_completed(futures):
         edge_counter.update(fut.result())
 
-    edge_counter = sorted(edge_counter.items(), key=lambda x: x[1], reverse=True)[:200]
+    # 提取出 node_num 个节点的边
+    edge_counter = sorted(edge_counter.items(), key=lambda x: x[1], reverse=True)[:node_num]
 
     nodeid_list = set()
     for (src_node, dst_node), count in edge_counter:
-        if len(nodeid_list) >= 200:
+        if len(nodeid_list) >= node_num:
             break
         nodeid_list.update([src_node, dst_node])
     nodeid_list = list(nodeid_list)
