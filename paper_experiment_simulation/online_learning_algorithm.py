@@ -16,14 +16,17 @@ from database_models.datasets_models import NodeTable, NodeTablePrediction, Edge
 
 os.environ["LOKY_MAX_CPU_COUNT"] = "4"
 
-# 撤回上限（每分钟每次）
-MAX_REVOKE_COUNT = 10000000
+# 撤回上限（QPS * 1800秒）
+MAX_REVOKE_COUNT = 1000000 * 1800
 
 # 目标误判率
 P_FALSE_TARGET = 0.00001
 
-# 容许的最大RTT
-MAX_RTT = 47
+# 容许的最大RTT（ms）
+MAX_RTT_TO_LEADER = 100
+
+# 集群中的节点数量
+NODE_COUNT = 10
 
 # 提前计算常量
 log_p_false_target = math.log(P_FALSE_TARGET)
@@ -252,7 +255,7 @@ def query_nodes_predictions(t: int, engine: sqlalchemy.Engine) -> pd.DataFrame:
 def create_gat_dataset(engine: sqlalchemy.Engine, t: int, communities: Dict):
     node_features = []  # 节点属性
     edge_index = []  # 边
-    similarity_matrix = np.zeros((200, 200))  # 相当于y标签
+    similarity_matrix = np.zeros((NODE_COUNT, NODE_COUNT))  # 相当于y标签
 
     nodeid_list = query_all_nodeid(t, engine)
 
@@ -283,12 +286,12 @@ def create_gat_dataset(engine: sqlalchemy.Engine, t: int, communities: Dict):
                 # 计算每个节点的可共享内存值
                 shareable_mem = alloc_mem - required_mem
                 # 根据每个节点的计算结果构建特征向量
-                node_features.append([shareable_mem, required_mem])
+                node_features.append([alloc_mem, required_mem, shareable_mem])
 
         # 将 node_features 转换为 numpy 数组，然后归一化，并转换为 PyTorch 张量
         node_features = np.array(node_features)
-        node_features_scaled = MinMaxScaler().fit_transform(node_features)
-        node_features_tensor = torch.tensor(node_features_scaled, dtype=torch.float)
+        node_features = MinMaxScaler().fit_transform(node_features)
+        node_features_tensor = torch.tensor(node_features, dtype=torch.float)
 
         # 构建 Edge Index
         print(f'构建 Edge Index（图的边集）')
@@ -321,7 +324,7 @@ def create_gat_dataset(engine: sqlalchemy.Engine, t: int, communities: Dict):
                 avg_rtt_1 = sum(rtt_1_result) / len(rtt_1_result)
                 avg_rtt_2 = sum(rtt_2_result) / len(rtt_2_result)
                 # 如果双向边权重不超过阈值，则连接节点对
-                if (avg_rtt_1 + avg_rtt_2) / 2 <= MAX_RTT:
+                if (avg_rtt_1 + avg_rtt_2) / 2 <= MAX_RTT_TO_LEADER:
                     edge_index.append([nodeid_list.index(node_a), nodeid_list.index(node_b)])
                     edge_index.append([nodeid_list.index(node_b), nodeid_list.index(node_a)])
 
@@ -364,7 +367,7 @@ def train_gat_model(gat_model: torch.nn.Module, node_features_tensor, edge_index
         optimizer.step()
 
         # 打印进度
-        if (epoch + 1) % 500 == 0:
+        if (epoch + 1) % 1000 == 0:
             print(f'GAT training epoch {epoch + 1}, Loss: {loss}')
 
         # 监控验证损失，执行早停
@@ -391,7 +394,7 @@ def main():
     sqlite_path = '../datasets/datasets.db'
     engine = sqlalchemy.create_engine(f'sqlite:///{sqlite_path}')
 
-    # 尝试删除撤回率预测表 `node_table_prediction`
+    # 尝试清空撤回率预测表 `node_table_prediction`
     with engine.connect() as conn:
         try:
             conn.execute(text('DROP TABLE IF EXISTS node_table_prediction;'))
@@ -408,7 +411,7 @@ def main():
     '''
     初始化 GAT 模型
     '''
-    gat_model = GAT(in_channels=2, hidden_channels=64, out_channels=200, num_heads=16)
+    gat_model = GAT(in_channels=3, hidden_channels=64, out_channels=NODE_COUNT, num_heads=NODE_COUNT)
     torch.save(gat_model.state_dict(), 'gat_model.pth')
 
     # 模拟在线训练和预测
@@ -503,7 +506,7 @@ def main():
                 dst_src = edges_df[(edges_df['src_node'] == leader_node) & (edges_df['dst_node'] == follower_node)]
                 if dst_src.empty: continue
                 rtt = (src_dst['tcp_out_delay'].mean() + dst_src['tcp_out_delay'].mean()) * 0.5
-                if rtt > MAX_RTT: continue
+                if rtt > MAX_RTT_TO_LEADER: continue
 
                 # 找到了可共享的节点，扣减可共享容量
                 shared_memory[leader_node] = shared_memory[leader_node] - required
@@ -517,11 +520,16 @@ def main():
                 memory_saved += required
                 break
 
-        # 打印社区划分结果
-        for index, (leader, nodes) in enumerate(communities.items()):
-            print(f'社区 {index}: {leader}，{"孤立节点社区" if not nodes else [i for i in nodes]}')
+        # 打印启发式算法社区划分结果
+        for index, (leader, followers) in enumerate(communities.items()):
+            if followers:
+                current_saved = sum(memory_required[follower] for follower in followers) / 8 / 1024 / 1024 / 1024
+                print(f'社区{index}：leader {leader}，follower {followers}，节约了{current_saved:.4f}GB内存')
+            else:
+                print(f'社区{index}：leader {leader}，孤立节点社区')
         print(f'共 {len(communities)} 个社区')
-        print(f'节约了{memory_saved / 8192 / 1024 / 1024 * 48:.4f} GB内存\n')
+        memory_saved = memory_saved / 8 / 1024 / 1024 / 1024
+        print(f'节约了 {memory_saved:.4f} GB内存\n')
 
         '''
         准备 GAT 模型在线学习数据集：Node Features（节点特征）、Edge Index（图的边集）以及 Similarity Matrix（相似度矩阵）
@@ -538,57 +546,116 @@ def main():
         '''
         使用 GAT 模型推理，并基于谱聚类预测社区划分
         '''
-        print(f'使用 GAT 模型推理，并基于谱聚类预测社区划分')
-        gat_model.eval()
-        with torch.no_grad():
-            output_matrix = gat_model(node_features_tensor, edge_index_tensor)
 
-        out_matrix_np = output_matrix.numpy()
-        out_matrix_np = (out_matrix_np + out_matrix_np.T) / 2  # 转对称矩阵
-
-        # 谱聚类
-        sc = SpectralClustering(n_clusters=155, affinity='precomputed', random_state=0)
-        prediction_labels = sc.fit_predict(out_matrix_np)
-
-        # 按照预测标签将节点分配到不同的社区
-        community_dict = {int(label): [] for label in prediction_labels}
-        for idx, label in enumerate(prediction_labels):
-            community_dict[int(label)].append(nodeid_list[idx])
-
-        # 整理社区
-        final_community = {}
+        # 1、计算节点的撤回数量
         nodes_df = query_nodes_predictions(t, engine)  # 查询预测的撤回数量
-        if len(nodes_df) == 0: continue
-
-        # 计算节点的撤回数量，并转换为字典
         average_cpu_utilization = nodes_df.groupby('nodeid')['cpu_utilization'].mean()
         node_revoke_num = (average_cpu_utilization * MAX_REVOKE_COUNT).astype(int).to_dict()
 
-        # 1、计算每个节点所需的内存（memory_required）
+        # 2、计算每个节点所需的内存（memory_required）
         memory_required = {nodeid: 0.0 for nodeid in nodeid_list}
         for nodeid, revoke_num in node_revoke_num.items():
             memory_required[nodeid] = - (revoke_num * log_p_false_target) / log2_squared
 
-        # 2、计算每个节点的可共享内存（shared_memory）
+        # 3、计算每个节点的可共享内存（shared_memory）
         shared_memory = {nodeid: 0.0 for nodeid in nodeid_list}
         for nodeid, required in memory_required.items():
             shared_memory[nodeid] = 2 ** math.ceil(math.log2(required)) - required
 
-        for label, nodes in community_dict.items():
-            if len(nodes) == 1:
-                final_community[nodes[0]] = []
+        # 4、查询节点之间的延迟值
+        edges_df = query_edges_delay(t, engine)
+
+        gat_model.eval()
+        with torch.no_grad():
+            output_matrix = gat_model(node_features_tensor, edge_index_tensor)
+        out_matrix_np = output_matrix.numpy()
+        out_matrix_np = (out_matrix_np + out_matrix_np.T) / 2  # 转换为对称矩阵
+
+        # 谱聚类
+        sc_eval = []
+        for n_clusters in range(int(NODE_COUNT * 0.5), int(NODE_COUNT * 0.8)):
+            sc = SpectralClustering(n_clusters=n_clusters, affinity='precomputed', random_state=0)
+            prediction_labels = sc.fit_predict(out_matrix_np)
+            final_community = {}
+
+            # 按照 谱聚类预测标签 将节点分配到社区
+            community_dict = {int(label): [] for label in prediction_labels}
+            for idx, label in enumerate(prediction_labels):
+                community_dict[int(label)].append(nodeid_list[idx])
+
+            # 进一步整理
+            memory_saved = 0.0
+            for label, nodes in community_dict.items():
+                # 孤立节点社区
+                if len(nodes) == 1:
+                    final_community[nodes[0]] = []  # 创建社区
+                # 多个节点组成的社区
+                else:
+                    leader = max(nodes, key=lambda x: memory_required[x])  # 寻找该社区的 leader 节点
+                    final_community[leader] = [node for node in nodes if node != leader]  # 创建社区
+                    memory_saved += sum(memory_required[follower] for follower in final_community[leader])  # 统计已节约的内存
+
+            # 评估结果
+            is_delay_constraint_satisfied = True  # 是否满足延迟约束
+            optimized_memory_required = 0.0  # 优化后所需的内存（GB）
+            max_false_positive_rate = 0.0  # 某个社区的最大误判率
+            sum_of_square_diff = 0.0
+
+            for index, (leader, followers) in enumerate(final_community.items()):
+                # for follower in followers:
+                #     # 检查延迟约束
+                #     src_dst = edges_df[(edges_df['src_node'] == follower) & (edges_df['dst_node'] == leader)]
+                #     if src_dst.empty:
+                #         is_delay_constraint_satisfied = False
+                #         break
+                #     dst_src = edges_df[(edges_df['src_node'] == leader) & (edges_df['dst_node'] == follower)]
+                #     if dst_src.empty:
+                #         is_delay_constraint_satisfied = False
+                #         break
+                #     rtt = (src_dst['tcp_out_delay'].mean() + dst_src['tcp_out_delay'].mean()) * 0.5
+                #     if rtt > MAX_RTT_TO_LEADER * 2:
+                #         is_delay_constraint_satisfied = False
+                #         break
+                # if not is_delay_constraint_satisfied:
+                #     break
+
+                # 计算评估分数
+                n = node_revoke_num[leader] + sum(node_revoke_num[follower] for follower in followers)  # 撤回数
+                m = 2 ** math.ceil(math.log2(memory_required[leader]))  # 所需内存
+                k_opt = m / n * math.log(2)  # 最佳哈希函数个数k
+                p = (1 - math.exp(-k_opt * n / m)) ** k_opt  # 误判率
+                max_false_positive_rate = max(max_false_positive_rate, p)
+                optimized_memory_required += m
+                sum_of_square_diff += (P_FALSE_TARGET - p) ** 2
+
+            # if not is_delay_constraint_satisfied:
+            #     print(f'谱聚类簇数量 {n_clusters} 失败，不满足延迟约束')
+            #     continue
             else:
-                # 寻找该社区的 leader 节点
-                leader = max(nodes, key=lambda x: memory_required[x])
-                final_community[leader] = [node for node in nodes if node != leader]
-                memory_saved += sum(memory_required[follower] for follower in final_community[leader])
+                sc_eval.append(
+                    {
+                        'n_clusters': n_clusters,
+                        'max_false_positive_rate': max_false_positive_rate,
+                        'optimized_memory_required': optimized_memory_required,
+                        'score': (1 / sum_of_square_diff),
+                        'final_community': final_community
+                    }
+                )
 
-        # 打印每个社区的领导节点和成员
-        for index, (leader, nodes) in enumerate(final_community.items()):
-            print(f'社区 {index}: {leader}，{"孤立节点社区" if not nodes else nodes}')
+        # 对聚类结果进行排序，根据 'score' 从大到小排列
+        sc_eval_sorted = sorted(sc_eval, key=lambda x: x['score'], reverse=True)
+        sc_result = sc_eval_sorted[0]
 
-        print(f'共 {len(final_community)} 个社区')
-        print(f'节约了{memory_saved / 8192 / 1024 / 1024 * 48:.4f} GB内存\n')
+        # 打印结果
+        for index, (leader, followers) in enumerate(sc_result['final_community'].items()):
+            if followers:
+                current_saved = sum(memory_required[follower] for follower in followers) / 8 / 1024 / 1024 / 1024
+                print(f'社区{index}：leader {leader}，follower {followers}，节约了{current_saved:.4f}GB内存')
+            else:
+                print(f'社区{index}：leader {leader}，孤立节点社区')
+        print(f'共 {len(communities)} 个社区')
+        memory_saved = memory_saved / 8 / 1024 / 1024 / 1024
+        print(f'节约了 {memory_saved:.4f} GB内存\n')
 
 
 if __name__ == '__main__':
