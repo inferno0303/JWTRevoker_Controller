@@ -11,7 +11,7 @@ from database_models.datasets_models import NodeTable, EdgeTable
 MAX_REVOKE_COUNT = 100000 * 1800
 
 # 目标误判率
-P_FALSE_TARGET = 0.000001
+P_FALSE_TARGET = 0.00001
 
 # 容许的最大RTT（ms）
 MAX_RTT_TO_LEADER = 100
@@ -19,10 +19,6 @@ MAX_RTT_TO_LEADER = 100
 # 提前计算常量
 log_p_false_target = math.log(P_FALSE_TARGET)
 log2_squared = math.log(2) ** 2
-
-
-def greedy_algorithm():
-    pass
 
 
 def main():
@@ -34,6 +30,7 @@ def main():
     # 模拟时间渐进（30分钟步进）
     for t in range(0, 72 * 3600, 1800):
         print(f'正在模拟第 {t / 3600} 小时')
+        event_uuid_str = str(uuid.uuid4())  # 社区划分事件id
 
         '''
         查询图数据
@@ -100,7 +97,6 @@ def main():
         memory_required_list = sorted(memory_required.items(), key=lambda x: x[1], reverse=True)
 
         communities = {nodeid: [] for nodeid in nodeid_list}
-        memory_saved = 0
 
         # print(f'启发式算法：计算社区划分')
 
@@ -132,38 +128,31 @@ def main():
 
                 # 记录社区划分
                 communities[leader_node].append(follower_node)
-                # print(f'{follower_node} -> {leader_node}')
                 del communities[follower_node]
-                memory_saved += required
                 break
 
         '''
         保存算法结果到 CSV 文件
         '''
-        # 文件名
-        file_name = 'greedy_algorithm_result.csv'
 
-        # 计算各字段
-        event_uuid_str = str(uuid.uuid4())  # 社区划分事件id
-        memory_saved = round(memory_saved / 8 / 1024 / 1024 / 1024, 4)  # 已节约的内存（GB）
+        # 计算各字段，并写入文件
+        file_name = 'greedy_algorithm_result(overview).csv'  # 文件名
+        memory_saved = 0.0  # 已节约的内存（GB）
         optimized_memory_required = 0.0  # 优化后所需的内存（GB）
         min_false_positive_rate = 1.0  # 最小误判率
         max_false_positive_rate = 0.0  # 最大误判率
         for leader, followers in communities.items():
-            n = node_revoke_num[leader] + sum(node_revoke_num[follower] for follower in followers)  # 撤回数
-            m = 2 ** math.ceil(math.log2(memory_required[leader]))  # 所需内存
+            memory_saved += sum(2 ** math.ceil(math.log2(memory_required[follower])) for follower in followers)
+            n = node_revoke_num[leader] + sum(node_revoke_num[follower] for follower in followers)  # 撤回数n
+            m = 2 ** math.ceil(math.log2(memory_required[leader]))  # 所需内存m
             k_opt = m / n * math.log(2)  # 最佳哈希函数个数k
-            p = (1 - math.exp(-k_opt * n / m)) ** k_opt  # 误判率
+            p = (1 - math.exp(-k_opt * n / m)) ** k_opt  # 误判率p
             optimized_memory_required += m  # 累加每个社区所需的内存
+            min_false_positive_rate = min(min_false_positive_rate, p)  # 更新最小误判率
+            max_false_positive_rate = max(max_false_positive_rate, p)  # 更新最小误判率
+        memory_saved = memory_saved / 8 / 1024 / 1024 / 1024  # 从 bit 转换为 GB
+        optimized_memory_required = optimized_memory_required / 8 / 1024 / 1024 / 1024  # 从 bit 转换为 GB
 
-            # 更新最小和最大误判率
-            min_false_positive_rate = min(min_false_positive_rate, p)
-            max_false_positive_rate = max(max_false_positive_rate, p)
-
-        # 从 bit 转换为 GB
-        optimized_memory_required = optimized_memory_required / 8 / 1024 / 1024 / 1024
-
-        # 写入文件
         if not os.path.exists(file_name):
             with open(file_name, mode='w', newline='') as file:
                 writer = csv.writer(file)
@@ -172,8 +161,6 @@ def main():
                      'max_rtt_to_leader', 'community_count', 'memory_saved', 'optimized_memory_required',
                      'min_false_positive_rate', 'max_false_positive_rate']
                 )
-
-        # 如果文件存在，按需追加内容
         with open(file_name, mode='a', newline='') as file:
             writer = csv.writer(file)
             writer.writerow(
@@ -182,13 +169,40 @@ def main():
                  max_false_positive_rate]
             )
 
+        # 写入文件
+        file_name = 'greedy_algorithm_result(community_detail).csv'  # 文件名
+        if not os.path.exists(file_name):
+            with open(file_name, mode='w', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(
+                    ['event_uuid_str', 'timestamp', 'node_num', 'p_false_target', 'max_revoke_count',
+                     'max_rtt_to_leader', 'community_id', 'leader_node', 'follower_nodes',
+                     'community_false_positive_rate', 'community_memory_required', 'community_memory_saved']
+                )
+        with open(file_name, mode='a', newline='') as file:
+            writer = csv.writer(file)
+            for index, (leader, followers) in enumerate(communities.items()):
+                community_id = f'community_{index + 1}'  # 社区ID
+                n = node_revoke_num[leader] + sum(node_revoke_num[follower] for follower in followers)  # 撤回数n
+                m = 2 ** math.ceil(math.log2(memory_required[leader]))  # 所需内存m
+                k_opt = m / n * math.log(2)  # 最佳哈希函数个数k
+                p = (1 - math.exp(-k_opt * n / m)) ** k_opt  # 误判率p
+                community_memory_required = m / 8 / 1024 / 1024 / 1024  # 当前社区所需内存（GB）
+                community_memory_saved = sum(2 ** math.ceil(math.log2(memory_required[follower])) for follower in
+                                             followers) / 8 / 1024 / 1024 / 1024  # 当前社区节约的内存（GB）
+                writer.writerow(
+                    [event_uuid_str, t, len(nodeid_list), P_FALSE_TARGET, MAX_REVOKE_COUNT, MAX_RTT_TO_LEADER,
+                     community_id, leader, followers, p, community_memory_required, community_memory_saved]
+                )
+
         # 打印结果
         for index, (leader, followers) in enumerate(communities.items()):
             if followers:
-                current_saved = sum(memory_required[follower] for follower in followers) / 8 / 1024 / 1024 / 1024
-                print(f'社区{index}：leader {leader}，follower {followers}，节约了{current_saved:.4f}GB内存')
+                current_saved = sum(2 ** math.ceil(math.log2(memory_required[follower])) for follower in followers)
+                current_saved = current_saved / 8 / 1024 / 1024 / 1024
+                print(f'社区{index + 1}：leader {leader}，follower {followers}，节约了{current_saved:.4f}GB内存')
             else:
-                print(f'社区{index}：leader {leader}，孤立节点社区')
+                print(f'社区{index + 1}：leader {leader}，孤立节点社区')
         print(f'共 {len(communities)} 个社区')
         print(f'节约了 {memory_saved:.4f} GB内存')
 

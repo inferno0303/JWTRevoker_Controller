@@ -1,12 +1,16 @@
 import os
 from typing import Tuple, List, Dict
+import math
+import itertools
+import uuid
+import csv
+
 import sqlalchemy
 from sqlalchemy import select, text, and_, distinct
 from sqlalchemy.orm import Session
+
 import numpy as np
 import pandas as pd
-import math
-import itertools
 import torch
 import torch_geometric
 from sklearn.preprocessing import MinMaxScaler
@@ -16,17 +20,17 @@ from database_models.datasets_models import NodeTable, NodeTablePrediction, Edge
 
 os.environ["LOKY_MAX_CPU_COUNT"] = "4"
 
+# 集群中的节点数量
+NODE_COUNT = 500
+
 # 撤回上限（QPS * 1800秒）
-MAX_REVOKE_COUNT = 1000000 * 1800
+MAX_REVOKE_COUNT = 100000 * 1800
 
 # 目标误判率
 P_FALSE_TARGET = 0.00001
 
 # 容许的最大RTT（ms）
 MAX_RTT_TO_LEADER = 100
-
-# 集群中的节点数量
-NODE_COUNT = 10
 
 # 提前计算常量
 log_p_false_target = math.log(P_FALSE_TARGET)
@@ -411,18 +415,18 @@ def main():
     '''
     初始化 GAT 模型
     '''
-    gat_model = GAT(in_channels=3, hidden_channels=64, out_channels=NODE_COUNT, num_heads=NODE_COUNT)
+    gat_model = GAT(in_channels=3, hidden_channels=64, out_channels=NODE_COUNT, num_heads=16)
     torch.save(gat_model.state_dict(), 'gat_model.pth')
 
     # 模拟在线训练和预测
     for t in range(0, 72 * 3600, 1800):
-
-        print(f'正在训练第 {t / 3600} 小时的数据')
+        print(f'正在模拟第 {t / 3600} 小时的数据')
+        event_uuid_str = str(uuid.uuid4())  # 社区划分事件id
 
         '''
         基于 LSTM 预测各节点的撤回数量
         '''
-        print(f'基于 LSTM 预测各节点的撤回数量')
+        print(f'基于 LSTM 预测下一时隙各节点的撤回数量')
 
         # 查询节点历史数据，用于 LSTM 模型训练输入
         graph_data = query_node_history(t, engine)
@@ -485,10 +489,8 @@ def main():
         memory_required_list = sorted(memory_required.items(), key=lambda x: x[1], reverse=True)
 
         communities = {nodeid: [] for nodeid in nodeid_list}
-        memory_saved = 0
 
         print(f'启发式算法：计算社区划分')
-
         # 4、迭代
         while memory_required_list:
             follower_node, required = memory_required_list.pop(0)  # 取出最大的物品
@@ -517,19 +519,79 @@ def main():
                 # 记录社区划分
                 communities[leader_node].append(follower_node)
                 del communities[follower_node]
-                memory_saved += required
                 break
 
-        # 打印启发式算法社区划分结果
-        for index, (leader, followers) in enumerate(communities.items()):
-            if followers:
-                current_saved = sum(memory_required[follower] for follower in followers) / 8 / 1024 / 1024 / 1024
-                print(f'社区{index}：leader {leader}，follower {followers}，节约了{current_saved:.4f}GB内存')
-            else:
-                print(f'社区{index}：leader {leader}，孤立节点社区')
+        '''
+        将启发式算法的结果写入 CSV
+        '''
+
+        # 基于 LSTM + 启发式算法 社区划分结果
+        file_name = 'lstm_and_greedy_algorithm_result(overview).csv'  # 文件名
+        memory_saved = 0.0  # 已节约的内存（GB）
+        optimized_memory_required = 0.0  # 优化后所需的内存（GB）
+        min_false_positive_rate = 1.0  # 最小误判率
+        max_false_positive_rate = 0.0  # 最大误判率
+        for leader, followers in communities.items():
+            memory_saved += sum(2 ** math.ceil(math.log2(memory_required[follower])) for follower in followers)
+            n = node_revoke_num[leader] + sum(node_revoke_num[follower] for follower in followers)  # 撤回数n
+            m = 2 ** math.ceil(math.log2(memory_required[leader]))  # 所需内存m
+            k_opt = m / n * math.log(2)  # 最佳哈希函数个数k
+            p = (1 - math.exp(-k_opt * n / m)) ** k_opt  # 误判率p
+            optimized_memory_required += m  # 累加每个社区所需的内存
+            min_false_positive_rate = min(min_false_positive_rate, p)  # 更新最小误判率
+            max_false_positive_rate = max(max_false_positive_rate, p)  # 更新最小误判率
+        memory_saved = memory_saved / 8 / 1024 / 1024 / 1024  # 从 bit 转换为 GB
+        optimized_memory_required = optimized_memory_required / 8 / 1024 / 1024 / 1024  # 从 bit 转换为 GB
+
+        # 如果没有文件则创建该文件
+        if not os.path.exists(file_name):
+            with open(file_name, mode='w', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(
+                    ['event_uuid_str', 'timestamp', 'node_num', 'p_false_target', 'max_revoke_count',
+                     'max_rtt_to_leader', 'community_count', 'memory_saved', 'optimized_memory_required',
+                     'min_false_positive_rate', 'max_false_positive_rate']
+                )
+
+        # 如果文件存在，按需追加内容
+        with open(file_name, mode='a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(
+                [event_uuid_str, t, len(nodeid_list), P_FALSE_TARGET, MAX_REVOKE_COUNT, MAX_RTT_TO_LEADER,
+                 len(communities), memory_saved, optimized_memory_required, min_false_positive_rate,
+                 max_false_positive_rate]
+            )
+
+        # 基于 LSTM + 启发式算法 社区划分结果细节
+        file_name = 'lstm_and_greedy_algorithm_result(community_detail).csv'  # 文件名
+        if not os.path.exists(file_name):
+            with open(file_name, mode='w', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(
+                    ['event_uuid_str', 'timestamp', 'node_num', 'p_false_target', 'max_revoke_count',
+                     'max_rtt_to_leader', 'community_id', 'leader_node', 'follower_nodes',
+                     'community_false_positive_rate', 'community_memory_required', 'community_memory_saved']
+                )
+        with open(file_name, mode='a', newline='') as file:
+            writer = csv.writer(file)
+            for index, (leader, followers) in enumerate(communities.items()):
+                community_id = f'community_{index + 1}'  # 社区ID
+                n = node_revoke_num[leader] + sum(node_revoke_num[follower] for follower in followers)  # 撤回数n
+                m = 2 ** math.ceil(math.log2(memory_required[leader]))  # 所需内存m
+                k_opt = m / n * math.log(2)  # 最佳哈希函数个数k
+                p = (1 - math.exp(-k_opt * n / m)) ** k_opt  # 误判率p
+                community_memory_required = m / 8 / 1024 / 1024 / 1024  # 当前社区所需内存（GB）
+                community_memory_saved = sum(2 ** math.ceil(math.log2(memory_required[follower])) for follower in
+                                             followers) / 8 / 1024 / 1024 / 1024  # 当前社区节约的内存（GB）
+                writer.writerow(
+                    [event_uuid_str, t, len(nodeid_list), P_FALSE_TARGET, MAX_REVOKE_COUNT, MAX_RTT_TO_LEADER,
+                     community_id, leader, followers, p, community_memory_required, community_memory_saved]
+                )
+
+        # 打印结果
         print(f'共 {len(communities)} 个社区')
-        memory_saved = memory_saved / 8 / 1024 / 1024 / 1024
-        print(f'节约了 {memory_saved:.4f} GB内存\n')
+        print(f'节约了 {memory_saved:.4f} GB内存')
+        continue
 
         '''
         准备 GAT 模型在线学习数据集：Node Features（节点特征）、Edge Index（图的边集）以及 Similarity Matrix（相似度矩阵）
@@ -562,9 +624,6 @@ def main():
         for nodeid, required in memory_required.items():
             shared_memory[nodeid] = 2 ** math.ceil(math.log2(required)) - required
 
-        # 4、查询节点之间的延迟值
-        edges_df = query_edges_delay(t, engine)
-
         gat_model.eval()
         with torch.no_grad():
             output_matrix = gat_model(node_features_tensor, edge_index_tensor)
@@ -582,80 +641,100 @@ def main():
             community_dict = {int(label): [] for label in prediction_labels}
             for idx, label in enumerate(prediction_labels):
                 community_dict[int(label)].append(nodeid_list[idx])
-
-            # 进一步整理
-            memory_saved = 0.0
             for label, nodes in community_dict.items():
-                # 孤立节点社区
-                if len(nodes) == 1:
+                if len(nodes) == 1:  # 孤立节点社区
                     final_community[nodes[0]] = []  # 创建社区
-                # 多个节点组成的社区
                 else:
-                    leader = max(nodes, key=lambda x: memory_required[x])  # 寻找该社区的 leader 节点
+                    leader = max(nodes, key=lambda x: memory_required[x])  # 多节点社区，寻找该社区的 leader 节点
                     final_community[leader] = [node for node in nodes if node != leader]  # 创建社区
-                    memory_saved += sum(memory_required[follower] for follower in final_community[leader])  # 统计已节约的内存
 
-            # 评估结果
-            is_delay_constraint_satisfied = True  # 是否满足延迟约束
+            # 评估
+            sc_score = 0.0  # 评估分数
+            memory_saved = 0.0  # 节约的内存（GB）
             optimized_memory_required = 0.0  # 优化后所需的内存（GB）
-            max_false_positive_rate = 0.0  # 某个社区的最大误判率
-            sum_of_square_diff = 0.0
-
-            for index, (leader, followers) in enumerate(final_community.items()):
-                # for follower in followers:
-                #     # 检查延迟约束
-                #     src_dst = edges_df[(edges_df['src_node'] == follower) & (edges_df['dst_node'] == leader)]
-                #     if src_dst.empty:
-                #         is_delay_constraint_satisfied = False
-                #         break
-                #     dst_src = edges_df[(edges_df['src_node'] == leader) & (edges_df['dst_node'] == follower)]
-                #     if dst_src.empty:
-                #         is_delay_constraint_satisfied = False
-                #         break
-                #     rtt = (src_dst['tcp_out_delay'].mean() + dst_src['tcp_out_delay'].mean()) * 0.5
-                #     if rtt > MAX_RTT_TO_LEADER * 2:
-                #         is_delay_constraint_satisfied = False
-                #         break
-                # if not is_delay_constraint_satisfied:
-                #     break
-
-                # 计算评估分数
-                n = node_revoke_num[leader] + sum(node_revoke_num[follower] for follower in followers)  # 撤回数
-                m = 2 ** math.ceil(math.log2(memory_required[leader]))  # 所需内存
+            min_false_positive_rate = 1.0  # 最小误判率
+            max_false_positive_rate = 0.0  # 最大误判率
+            for leader, followers in final_community.items():
+                memory_saved += sum(2 ** math.ceil(math.log2(memory_required[follower])) for follower in followers)
+                n = node_revoke_num[leader] + sum(node_revoke_num[follower] for follower in followers)  # 撤回数n
+                m = 2 ** math.ceil(math.log2(memory_required[leader]))  # 所需内存m
                 k_opt = m / n * math.log(2)  # 最佳哈希函数个数k
-                p = (1 - math.exp(-k_opt * n / m)) ** k_opt  # 误判率
-                max_false_positive_rate = max(max_false_positive_rate, p)
-                optimized_memory_required += m
-                sum_of_square_diff += (P_FALSE_TARGET - p) ** 2
+                p = (1 - math.exp(-k_opt * n / m)) ** k_opt  # 误判率p
+                optimized_memory_required += m  # 累加每个社区所需的内存
+                min_false_positive_rate = min(min_false_positive_rate, p)  # 更新最小误判率
+                max_false_positive_rate = max(max_false_positive_rate, p)  # 更新最小误判率
+                sc_score += (P_FALSE_TARGET - p) ** 2
+            memory_saved = memory_saved / 8 / 1024 / 1024 / 1024  # 从 bit 转换为 GB
+            optimized_memory_required = optimized_memory_required / 8 / 1024 / 1024 / 1024  # 从 bit 转换为 GB
+            sc_score = 1 / sc_score  # 取倒数，越大越好
 
-            # if not is_delay_constraint_satisfied:
-            #     print(f'谱聚类簇数量 {n_clusters} 失败，不满足延迟约束')
-            #     continue
-            else:
-                sc_eval.append(
-                    {
-                        'n_clusters': n_clusters,
-                        'max_false_positive_rate': max_false_positive_rate,
-                        'optimized_memory_required': optimized_memory_required,
-                        'score': (1 / sum_of_square_diff),
-                        'final_community': final_community
-                    }
-                )
+            # 收集谱聚类结果
+            sc_eval.append(
+                {
+                    'n_clusters': n_clusters,
+                    'community_count': len(final_community),
+                    'memory_saved': memory_saved,
+                    'optimized_memory_required': optimized_memory_required,
+                    'min_false_positive_rate': min_false_positive_rate,
+                    'max_false_positive_rate': max_false_positive_rate,
+                    'sc_score': sc_score,
+                    'final_community': final_community
+                }
+            )
 
         # 对聚类结果进行排序，根据 'score' 从大到小排列
-        sc_eval_sorted = sorted(sc_eval, key=lambda x: x['score'], reverse=True)
-        sc_result = sc_eval_sorted[0]
+        sc_result = sorted(sc_eval, key=lambda x: x['sc_score'], reverse=True)[0]
 
-        # 打印结果
-        for index, (leader, followers) in enumerate(sc_result['final_community'].items()):
-            if followers:
-                current_saved = sum(memory_required[follower] for follower in followers) / 8 / 1024 / 1024 / 1024
-                print(f'社区{index}：leader {leader}，follower {followers}，节约了{current_saved:.4f}GB内存')
-            else:
-                print(f'社区{index}：leader {leader}，孤立节点社区')
-        print(f'共 {len(communities)} 个社区')
-        memory_saved = memory_saved / 8 / 1024 / 1024 / 1024
-        print(f'节约了 {memory_saved:.4f} GB内存\n')
+        '''
+        将 GAT 推理的结果写入 CSV
+        '''
+        # 基于 LSTM + GAT 社区划分结果
+        file_name = 'lstm_and_gat_result(overview).csv'  # 文件名
+        if not os.path.exists(file_name):
+            with open(file_name, mode='w', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(
+                    ['event_uuid_str', 'timestamp', 'node_num', 'p_false_target', 'max_revoke_count',
+                     'max_rtt_to_leader', 'community_count', 'memory_saved', 'optimized_memory_required',
+                     'min_false_positive_rate', 'max_false_positive_rate']
+                )
+        with open(file_name, mode='a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(
+                [event_uuid_str, t, len(nodeid_list), P_FALSE_TARGET, MAX_REVOKE_COUNT, MAX_RTT_TO_LEADER,
+                 sc_result['community_count'], sc_result['memory_saved'], sc_result['optimized_memory_required'],
+                 sc_result['min_false_positive_rate'], sc_result['max_false_positive_rate']]
+            )
+
+        # 基于 LSTM + GAT 社区划分结果细节
+        file_name = 'lstm_and_gat_result(community_detail).csv'  # 文件名
+        if not os.path.exists(file_name):
+            with open(file_name, mode='w', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(
+                    ['event_uuid_str', 'timestamp', 'node_num', 'p_false_target', 'max_revoke_count',
+                     'max_rtt_to_leader', 'community_id', 'leader_node', 'follower_nodes',
+                     'community_false_positive_rate', 'community_memory_required', 'community_memory_saved']
+                )
+        with open(file_name, mode='a', newline='') as file:
+            writer = csv.writer(file)
+            for index, (leader, followers) in enumerate(sc_result['final_community'].items()):
+                community_id = f'community_{index + 1}'  # 社区ID
+                n = node_revoke_num[leader] + sum(node_revoke_num[follower] for follower in followers)  # 撤回数n
+                m = 2 ** math.ceil(math.log2(memory_required[leader]))  # 所需内存m
+                k_opt = m / n * math.log(2)  # 最佳哈希函数个数k
+                p = (1 - math.exp(-k_opt * n / m)) ** k_opt  # 误判率p
+                community_memory_required = m / 8 / 1024 / 1024 / 1024  # 当前社区所需内存（GB）
+                community_memory_saved = sum(2 ** math.ceil(math.log2(memory_required[follower])) for follower in
+                                             followers) / 8 / 1024 / 1024 / 1024  # 当前社区节约的内存（GB）
+                writer.writerow(
+                    [event_uuid_str, t, len(nodeid_list), P_FALSE_TARGET, MAX_REVOKE_COUNT, MAX_RTT_TO_LEADER,
+                     community_id, leader, followers, p, community_memory_required, community_memory_saved]
+                )
+
+        # 打印 GAT 推理结果
+        print(f'共 {sc_result['community_count']} 个社区')
+        print(f'节约了 {sc_result['memory_saved']:.4f} GB内存')
 
 
 if __name__ == '__main__':
