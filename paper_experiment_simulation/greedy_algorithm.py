@@ -10,11 +10,11 @@ from database_models.datasets_models import NodeTable, EdgeTable
 # 撤回上限（QPS * 1800秒）
 MAX_REVOKE_COUNT = 100000 * 1800
 
-# 目标误判率
-P_FALSE_TARGET = 0.00001
-
 # 容许的最大RTT（ms）
 MAX_RTT_TO_LEADER = 100
+
+# 目标误判率
+P_FALSE_TARGET = 0.00001
 
 # 提前计算常量
 log_p_false_target = math.log(P_FALSE_TARGET)

@@ -18,19 +18,19 @@ from sklearn.cluster import SpectralClustering
 
 from database_models.datasets_models import NodeTable, NodeTablePrediction, EdgeTable
 
-os.environ["LOKY_MAX_CPU_COUNT"] = "4"
+os.environ["LOKY_MAX_CPU_COUNT"] = "6"
 
 # 集群中的节点数量
-NODE_COUNT = 500
+NODE_COUNT = 200
 
 # 撤回上限（QPS * 1800秒）
 MAX_REVOKE_COUNT = 100000 * 1800
 
-# 目标误判率
-P_FALSE_TARGET = 0.00001
-
 # 容许的最大RTT（ms）
 MAX_RTT_TO_LEADER = 100
+
+# 目标误判率
+P_FALSE_TARGET = 0.00001
 
 # 提前计算常量
 log_p_false_target = math.log(P_FALSE_TARGET)
@@ -591,7 +591,6 @@ def main():
         # 打印结果
         print(f'共 {len(communities)} 个社区')
         print(f'节约了 {memory_saved:.4f} GB内存')
-        continue
 
         '''
         准备 GAT 模型在线学习数据集：Node Features（节点特征）、Edge Index（图的边集）以及 Similarity Matrix（相似度矩阵）
