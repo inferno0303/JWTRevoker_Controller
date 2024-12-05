@@ -138,8 +138,11 @@ def read_zip_csv_and_insert_to_db(zip_file_path: str, nodeid_list: list[str], in
 
 def insert_to_db(insert_queue: queue.Queue, table_mapper: sqlalchemy.orm.Mapper):
     config = configparser.ConfigParser()
-    config.read('config.txt', encoding='utf-8')
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(script_dir, 'config.txt')
+    config.read(config_path, encoding='utf-8')
     db_path = config.get('DB_PATH', 'datasets_db')
+    db_path = os.path.join(script_dir, db_path)
     engine = get_database_engine(db_path)
     count = 0
 
@@ -217,7 +220,9 @@ def main():
 
     # 读取配置文件
     config = configparser.ConfigParser()
-    config.read('config.txt', encoding='utf-8')
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(script_dir, 'config.txt')
+    config.read(config_path, encoding='utf-8')
     node_num = int(config.get('NODE_NUM', 'node_num'))
 
     '''
@@ -226,6 +231,7 @@ def main():
 
     # 获取数据库路径
     db_path = config.get('DB_PATH', 'datasets_db')
+    db_path = os.path.join(script_dir, db_path)
 
     # 初始化数据库连接
     engine = get_database_engine(db_path)
@@ -239,6 +245,7 @@ def main():
 
     #  获取 DATASETS_PATH 下 IWQoS23EdgeMeasurements 路径
     datasets_path = config.get('DATASETS_PATH', 'IWQoS23EdgeMeasurements')
+    datasets_path = os.path.join(script_dir, datasets_path)
 
     # 查找 'dataset.zip' 文件
     file_list = sorted(glob.glob(os.path.join(datasets_path, 'dataset.zip')))

@@ -1,5 +1,4 @@
 import os
-from typing import Tuple, List, Dict
 import math
 import itertools
 import uuid
@@ -82,7 +81,7 @@ def query_node_history(t: int, engine: sqlalchemy.Engine) -> pd.DataFrame:
 
 
 # 创建 LSTM 模型的监督学习样本
-def create_supervised_lstm_samples(history_data: pd.DataFrame, seq_length: int, window_size: int) -> Tuple[List, List]:
+def create_supervised_lstm_samples(history_data: pd.DataFrame, seq_length: int, window_size: int) -> tuple[list, list]:
     """
     创建 LSTM 模型的监督学习样本。
 
@@ -151,7 +150,7 @@ def train_lstm_model(model: torch.nn.Module, inputs: torch.Tensor, targets: torc
 
 
 # 通过 LSTM 预测
-def predictions_by_lstm(model: torch.nn.Module, history_data: pd.DataFrame, prediction_steps: int) -> Dict:
+def predictions_by_lstm(model: torch.nn.Module, history_data: pd.DataFrame, prediction_steps: int) -> dict:
     # 存储每个节点的预测结果
     result = {}
 
@@ -188,7 +187,7 @@ def predictions_by_lstm(model: torch.nn.Module, history_data: pd.DataFrame, pred
 
 
 # 保存节点撤回数结果到数据库
-def save_prediction_to_db(engine: sqlalchemy.Engine, t: int, result: Dict[str, List]):
+def save_prediction_to_db(engine: sqlalchemy.Engine, t: int, result: dict[str, list]):
     NodeTablePrediction.metadata.create_all(engine)  # 如果不存在数据表，则创建数据表
     with Session(engine) as session:
         try:
@@ -210,7 +209,7 @@ def save_prediction_to_db(engine: sqlalchemy.Engine, t: int, result: Dict[str, L
 
 
 # 查询所有节点列表
-def query_all_nodeid(t: int, engine: sqlalchemy.Engine) -> List:
+def query_all_nodeid(t: int, engine: sqlalchemy.Engine) -> list:
     with Session(engine) as session:
         result = session.execute(
             select(distinct(NodeTablePrediction.nodeid))
@@ -256,7 +255,7 @@ def query_nodes_predictions(t: int, engine: sqlalchemy.Engine) -> pd.DataFrame:
 
 
 # 创建 GAT 模型训练数据集
-def create_gat_dataset(engine: sqlalchemy.Engine, t: int, communities: Dict):
+def create_gat_dataset(engine: sqlalchemy.Engine, t: int, communities: dict):
     node_features = []  # 节点属性
     edge_index = []  # 边
     similarity_matrix = np.zeros((NODE_COUNT, NODE_COUNT))  # 相当于y标签

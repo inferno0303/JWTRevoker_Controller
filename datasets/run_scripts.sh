@@ -10,7 +10,7 @@ START_TIME=$(date +%s)
 
 for script in "${scripts[@]}"; do
     echo "Running $script"
-    python "$script" "node_num=$node_num"
+    python "$SCRIPT_DIR/$script"
 
     if [ $? -ne 0 ]; then
         echo "Error: $script failed to run successfully!" >&2

@@ -145,7 +145,9 @@ def main():
 
     # 读取配置文件
     config = configparser.ConfigParser()
-    config.read('config.txt', encoding='utf-8')
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(script_dir, 'config.txt')
+    config.read(config_path, encoding='utf-8')
 
     '''
     初始化数据库
@@ -153,6 +155,7 @@ def main():
 
     # 获取数据库路径
     db_path = config.get('DB_PATH', 'datasets_db')
+    db_path = os.path.join(script_dir, db_path)
 
     # 初始化数据库连接
     engine = get_database_engine(db_path)
