@@ -101,12 +101,10 @@ def main():
         # 3、对 memory_required （物品）从大到小排序
         memory_required_list = sorted(memory_required.items(), key=lambda x: x[1], reverse=True)
 
-        communities = {node: [] for node in node_list}
-
         # 4、迭代
+        communities = {node: [] for node in node_list}
         while memory_required_list:
             follower_node, required = memory_required_list.pop(0)  # 取出最大的物品
-            # print(f'取出物品：{follower_node}，剩余{len(memory_required_list)}')
 
             # 对 shared_memory （背包）从小到大排序
             shared_memory_list = sorted(shared_memory.items(), key=lambda x: x[1])

@@ -1,6 +1,9 @@
 import os
 import math
-from sqlalchemy import create_engine, select, distinct, and_
+
+import sqlalchemy
+from sqlalchemy import create_engine, select, distinct, and_, func
+import numpy as np
 import pandas as pd
 import uuid
 import csv
@@ -21,6 +24,94 @@ log_p_false_target = math.log(P_FALSE_TARGET)
 log2_squared = math.log(2) ** 2
 
 
+# 查询节点列表
+def query_node_list(connection: sqlalchemy.Connection, t: int) -> list[str]:
+    node_list = connection.execute(
+        select(distinct(NodeTable.nodeid))
+        .where(
+            and_(
+                NodeTable.time_sequence >= t,
+                NodeTable.time_sequence < t + 1800
+            )
+        )
+        .order_by(NodeTable.nodeid)
+    ).scalars().all()
+    return list(node_list)
+
+
+# 生成节点到序号的映射
+def generate_node_to_index(node_list: list[str]) -> dict[str, int]:
+    node_to_index = {}
+    for i, node in enumerate(node_list):
+        node_to_index[node] = i
+    return node_to_index
+
+
+# 查询每个节点的撤回数
+def query_node_revoke_num(connection: sqlalchemy.Connection, t: int) -> dict[str, int]:
+    result = connection.execute(
+        select(NodeTable.time_sequence, NodeTable.nodeid, NodeTable.cpu_utilization)
+        .where(
+            and_(
+                NodeTable.time_sequence >= t,
+                NodeTable.time_sequence < t + 1800
+            )
+        )
+    ).fetchall()
+    nodes_df = pd.DataFrame(result, columns=['time_sequence', 'nodeid', 'cpu_utilization'])
+
+    # 计算每个 nodeid 的平均 cpu_utilization
+    average_cpu_utilization = nodes_df.groupby('nodeid')['cpu_utilization'].mean()
+
+    # 通过 cpu_utilization 计算每个 nodeid 的撤回数
+    node_revoke_num = (average_cpu_utilization * MAX_REVOKE_COUNT).astype(int).to_dict()
+    return node_revoke_num
+
+
+# 查询节点延迟矩阵
+def query_rtt_matrix(connection: sqlalchemy.Connection, t: int, node_list: list[str]) -> np.array:
+    node_count = len(node_list)
+    rtt_matrix = np.zeros((node_count, node_count))
+    for i, node_src in enumerate(node_list):
+        for j, node_dst in enumerate(node_list):
+            if i == j:
+                continue
+
+            # 查询两方向的RTT
+            result_src_dst = connection.execute(
+                select(func.avg(EdgeTable.tcp_out_delay))
+                .where(
+                    and_(
+                        EdgeTable.time_sequence >= t,
+                        EdgeTable.time_sequence < t + 1800,
+                        EdgeTable.src_node == node_src,
+                        EdgeTable.dst_node == node_dst
+                    )
+                )
+            ).scalar()
+
+            result_dst_src = connection.execute(
+                select(func.avg(EdgeTable.tcp_out_delay))
+                .where(
+                    and_(
+                        EdgeTable.time_sequence >= t,
+                        EdgeTable.time_sequence < t + 1800,
+                        EdgeTable.src_node == node_dst,
+                        EdgeTable.dst_node == node_src
+                    )
+                )
+            ).scalar()
+
+            # 处理空值
+            if result_src_dst is None:
+                result_src_dst = float('inf')
+            if result_dst_src is None:
+                result_dst_src = float('inf')
+            rtt_matrix[i, j] = result_src_dst
+            rtt_matrix[j, i] = result_dst_src
+    return rtt_matrix
+
+
 def main():
     # 连接数据库
     sqlite_path = '../datasets/datasets.db'
@@ -30,80 +121,35 @@ def main():
     # 模拟时间渐进（30分钟步进）
     for t in range(0, 72 * 3600, 1800):
         print(f'正在模拟第 {t / 3600} 小时')
-        event_uuid_str = str(uuid.uuid4())  # 社区划分事件id
 
         '''
         查询图数据
         '''
-        # 查询节点列表
-        nodeid_list = connection.execute(
-            select(distinct(NodeTable.nodeid))
-            .where(
-                and_(
-                    NodeTable.time_sequence >= t,
-                    NodeTable.time_sequence < t + 1800
-                )
-            )
-            .order_by(NodeTable.nodeid)
-        ).scalars().all()
-        if not nodeid_list: continue
-
-        # 查询节点属性
-        result = connection.execute(
-            select(NodeTable.time_sequence, NodeTable.nodeid, NodeTable.cpu_utilization)
-            .where(
-                and_(
-                    NodeTable.time_sequence >= t,
-                    NodeTable.time_sequence < t + 1800
-                )
-            )
-        ).fetchall()
-        nodes_df = pd.DataFrame(result, columns=['time_sequence', 'nodeid', 'cpu_utilization'])
-        if len(nodes_df) == 0: continue
-
-        # 查询节点延迟
-        result = connection.execute(
-            select(EdgeTable.time_sequence, EdgeTable.src_node, EdgeTable.dst_node, EdgeTable.tcp_out_delay)
-            .where(
-                and_(
-                    EdgeTable.time_sequence >= t,
-                    EdgeTable.time_sequence < t + 1800
-                )
-            )
-        ).fetchall()
-        edges_df = pd.DataFrame(result, columns=['time_sequence', 'src_node', 'dst_node', 'tcp_out_delay'])
-        if len(edges_df) == 0: continue
-
-        # 计算每个 nodeid 的平均 cpu_utilization
-        average_cpu_utilization = nodes_df.groupby('nodeid')['cpu_utilization'].mean()
-
-        # 通过 cpu_utilization 计算每个 nodeid 的撤回数
-        node_revoke_num = (average_cpu_utilization * MAX_REVOKE_COUNT).astype(int).to_dict()
+        node_list = query_node_list(connection, t)
+        node_to_index = generate_node_to_index(node_list)
+        node_revoke_num = query_node_revoke_num(connection, t)
+        rtt_matrix = query_rtt_matrix(connection, t, node_list)
 
         '''
         启发式算法
         '''
         # 1、计算每个节点所需的内存（memory_required）
-        memory_required = {nodeid: 0.0 for nodeid in nodeid_list}
-        for nodeid, revoke_num in node_revoke_num.items():
-            memory_required[nodeid] = - (revoke_num * log_p_false_target) / log2_squared
+        memory_required = {node: 0.0 for node in node_list}
+        for node, revoke_num in node_revoke_num.items():
+            memory_required[node] = - (revoke_num * log_p_false_target) / log2_squared
 
         # 2、计算每个节点的可共享内存（shared_memory）
-        shared_memory = {nodeid: 0.0 for nodeid in nodeid_list}
-        for nodeid, required in memory_required.items():
-            shared_memory[nodeid] = 2 ** math.ceil(math.log2(required)) - required
+        shared_memory = {node: 0.0 for node in node_list}
+        for node, required in memory_required.items():
+            shared_memory[node] = 2 ** math.ceil(math.log2(required)) - required
 
         # 3、对 memory_required （物品）从大到小排序
         memory_required_list = sorted(memory_required.items(), key=lambda x: x[1], reverse=True)
 
-        communities = {nodeid: [] for nodeid in nodeid_list}
-
-        # print(f'启发式算法：计算社区划分')
-
         # 4、迭代
+        communities = {node: [] for node in node_list}
         while memory_required_list:
             follower_node, required = memory_required_list.pop(0)  # 取出最大的物品
-            # print(f'取出物品：{follower_node}，剩余{len(memory_required_list)}')
 
             # 对 shared_memory （背包）从小到大排序
             shared_memory_list = sorted(shared_memory.items(), key=lambda x: x[1])
@@ -113,11 +159,9 @@ def main():
                 if follower_node == leader_node or required > shared: continue
 
                 # 6、检查是否满足约束条件：延迟约束不超过 MAX_RTT
-                src_dst = edges_df[(edges_df['src_node'] == follower_node) & (edges_df['dst_node'] == leader_node)]
-                if src_dst.empty: continue
-                dst_src = edges_df[(edges_df['src_node'] == leader_node) & (edges_df['dst_node'] == follower_node)]
-                if dst_src.empty: continue
-                rtt = (src_dst['tcp_out_delay'].mean() + dst_src['tcp_out_delay'].mean()) * 0.5
+                follower_to_leader_rtt = rtt_matrix[node_to_index[follower_node], node_to_index[leader_node]]
+                leader_to_follower_rtt = rtt_matrix[node_to_index[leader_node], node_to_index[follower_node]]
+                rtt = (follower_to_leader_rtt + leader_to_follower_rtt) / 2
                 if rtt > MAX_RTT_TO_LEADER: continue
 
                 # 找到了可共享的节点，扣减可共享容量
@@ -130,6 +174,7 @@ def main():
                 communities[leader_node].append(follower_node)
                 del communities[follower_node]
                 break
+        pass
 
         '''
         保存算法结果到 CSV 文件
@@ -137,6 +182,7 @@ def main():
 
         # 计算各字段，并写入文件
         file_name = 'greedy_algorithm_result(overview).csv'  # 文件名
+        event_uuid_str = str(uuid.uuid4())  # 社区划分事件id
         memory_saved = 0.0  # 已节约的内存（GB）
         optimized_memory_required = 0.0  # 优化后所需的内存（GB）
         min_false_positive_rate = 1.0  # 最小误判率
@@ -164,12 +210,12 @@ def main():
         with open(file_name, mode='a', newline='') as file:
             writer = csv.writer(file)
             writer.writerow(
-                [event_uuid_str, t, len(nodeid_list), P_FALSE_TARGET, MAX_REVOKE_COUNT, MAX_RTT_TO_LEADER,
+                [event_uuid_str, t, len(node_list), P_FALSE_TARGET, MAX_REVOKE_COUNT, MAX_RTT_TO_LEADER,
                  len(communities), memory_saved, optimized_memory_required, min_false_positive_rate,
                  max_false_positive_rate]
             )
 
-        # 写入文件
+        # 记录详细社区划分结果
         file_name = 'greedy_algorithm_result(community_detail).csv'  # 文件名
         if not os.path.exists(file_name):
             with open(file_name, mode='w', newline='') as file:
@@ -191,18 +237,18 @@ def main():
                 community_memory_saved = sum(2 ** math.ceil(math.log2(memory_required[follower])) for follower in
                                              followers) / 8 / 1024 / 1024 / 1024  # 当前社区节约的内存（GB）
                 writer.writerow(
-                    [event_uuid_str, t, len(nodeid_list), P_FALSE_TARGET, MAX_REVOKE_COUNT, MAX_RTT_TO_LEADER,
+                    [event_uuid_str, t, len(node_list), P_FALSE_TARGET, MAX_REVOKE_COUNT, MAX_RTT_TO_LEADER,
                      community_id, leader, followers, p, community_memory_required, community_memory_saved]
                 )
 
         # 打印结果
-        for index, (leader, followers) in enumerate(communities.items()):
-            if followers:
-                current_saved = sum(2 ** math.ceil(math.log2(memory_required[follower])) for follower in followers)
-                current_saved = current_saved / 8 / 1024 / 1024 / 1024
-                print(f'社区{index + 1}：leader {leader}，follower {followers}，节约了{current_saved:.4f}GB内存')
-            else:
-                print(f'社区{index + 1}：leader {leader}，孤立节点社区')
+        # for index, (leader, followers) in enumerate(communities.items()):
+        #     if followers:
+        #         current_saved = sum(2 ** math.ceil(math.log2(memory_required[follower])) for follower in followers)
+        #         current_saved = current_saved / 8 / 1024 / 1024 / 1024
+        #         print(f'社区{index + 1}：leader {leader}，follower {followers}，节约了{current_saved:.4f}GB内存')
+        #     else:
+        #         print(f'社区{index + 1}：leader {leader}，孤立节点社区')
         print(f'共 {len(communities)} 个社区')
         print(f'节约了 {memory_saved:.4f} GB内存')
 
