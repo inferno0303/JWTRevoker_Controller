@@ -180,9 +180,6 @@ def predictions_by_lstm(model: torch.nn.Module, history_data: pd.DataFrame, pred
 
             # 保存预测结果
             result[nodeid] = predicted_seq
-            # print(f'History avg: {nodeid}: {group['cpu_utilization'].mean()}')  # 打印历史值
-            # print(f'Prediction avg: {nodeid}: {sum(predicted_seq) / len(predicted_seq)}')  # 打印预测值
-            # print()
     return result
 
 
@@ -606,22 +603,6 @@ def main():
         '''
         使用 GAT 模型推理，并基于谱聚类预测社区划分
         '''
-
-        # 1、计算节点的撤回数量
-        nodes_df = query_nodes_predictions(t, engine)  # 查询预测的撤回数量
-        average_cpu_utilization = nodes_df.groupby('nodeid')['cpu_utilization'].mean()
-        node_revoke_num = (average_cpu_utilization * MAX_REVOKE_COUNT).astype(int).to_dict()
-
-        # 2、计算每个节点所需的内存（memory_required）
-        memory_required = {nodeid: 0.0 for nodeid in nodeid_list}
-        for nodeid, revoke_num in node_revoke_num.items():
-            memory_required[nodeid] = - (revoke_num * log_p_false_target) / log2_squared
-
-        # 3、计算每个节点的可共享内存（shared_memory）
-        shared_memory = {nodeid: 0.0 for nodeid in nodeid_list}
-        for nodeid, required in memory_required.items():
-            shared_memory[nodeid] = 2 ** math.ceil(math.log2(required)) - required
-
         gat_model.eval()
         with torch.no_grad():
             output_matrix = gat_model(node_features_tensor, edge_index_tensor)
